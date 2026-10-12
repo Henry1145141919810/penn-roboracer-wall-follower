@@ -28,7 +28,8 @@ switch ($cmd) {
   }
   'run' {
     docker exec $name bash -c 'source /opt/ros/humble/setup.bash && cd /home/autodrive_devkit && colcon build 2>&1 | tail -1'
-    docker exec -it $name bash -c "$ros && ros2 run autodrive_roboracer wall_follow_node --ros-args $rest"
+    $extra = if ($rest) { '--ros-args ' + ($rest -join ' ') } else { '' }
+    docker exec -it $name bash -c "$ros && ros2 run autodrive_roboracer wall_follow_node $extra"
   }
   'shell' { docker exec -it $name bash -c "$ros; exec bash" }
   'test'  { docker exec $name bash -c "$ros && cd /work && python3 -m pytest -q tests autodrive_devkit/test/test_wall_follow.py" }

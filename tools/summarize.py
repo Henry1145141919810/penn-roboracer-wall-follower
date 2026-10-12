@@ -3,6 +3,7 @@
 
     python3 tools/summarize.py                 # every label
     python3 tools/summarize.py B1 B2 F0        # labels starting with these prefixes
+    python3 tools/summarize.py experiments/results_final.jsonl   # a saved results file
 
 Lap 1 of every run is dropped: the simulator's lap timer is not restarted by a
 reset, so lap 1 also contains the idle time before the car starts. Laps 2+
@@ -18,6 +19,9 @@ RESULTS = os.path.join(os.path.dirname(__file__), '..', 'runs', 'results.jsonl')
 
 
 def main():
+    global RESULTS
+    if len(sys.argv) > 1 and sys.argv[1].endswith('.jsonl'):  # a saved results file
+        RESULTS = sys.argv.pop(1)
     prefixes = sys.argv[1:]
     groups = {}
     with open(RESULTS) as f:

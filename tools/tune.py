@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Black-box tuning of the controller with CMA-ES.
 
-Use ONE worker. Several headless simulators on the same PC change the
-simulator's behaviour (measured: ~190 new LiDAR scans/s instead of 40, and the
-final config crashed on all three), so parallel results do not transfer.
+Containers on the same Docker network discover each other's ROS 2 topics, so
+parallel workers MUST use different ROS_DOMAIN_IDs (scripts/tune_up.ps1 sets
+them). A first parallel attempt without them mixed the cars' scans and commands
+(~190 "new" scans/s, crashes); the results in this repo come from one worker.
 
 Each worker owns one simulator (its own container, bridge and port) and runs
 jobs that the optimiser writes into runs/tune/<worker>/. A job is one call of
@@ -70,7 +71,10 @@ def worker(wid):
         for k, v in job['params'].items():
             cmd += ['-p', f'{k}={v}']
         with open(os.path.join(jobs, 'worker.log'), 'a') as log:
-            subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT)
+            try:
+                subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, timeout=300)
+            except subprocess.TimeoutExpired:
+                log.write(f'timeout: {job["label"]}\n')
         result = None  # stays None (scored as a crash) if the run failed
         results = os.path.join(jobs, 'results.jsonl')
         if os.path.exists(results):
@@ -116,6 +120,9 @@ def optimise(workers, generations, popsize, sigma, tag='tune', start=None, bound
             job = {'label': label, 'params': to_params(x)}
             os.makedirs(os.path.join(ROOT, wid), exist_ok=True)
             path = os.path.join(ROOT, wid, f'job_{label}.json')
+            stale = os.path.join(ROOT, wid, f'result_{label}.json')
+            if os.path.exists(stale):  # never accept a result from an earlier run
+                os.remove(stale)
             json.dump(job, open(path + '.tmp', 'w'))
             os.replace(path + '.tmp', path)
             tickets.append(os.path.join(ROOT, wid, f'result_{label}.json'))

@@ -123,6 +123,8 @@ def validate(params):
     [float(v) for v in speeds]
     if params.v_full_throttle <= 0.0 or params.d_filter_tau < 0.0 or params.steer_tau < 0.0:
         raise ValueError('v_full_throttle must be > 0 and filter time constants >= 0')
+    if params.traction_slip > 0.0 and params.traction_offset <= 0.0:
+        raise ValueError('traction_offset must be > 0, or the car can never start moving')
 
 
 def clean_ranges(ranges, range_max):

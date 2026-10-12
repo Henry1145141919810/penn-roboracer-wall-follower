@@ -263,7 +263,8 @@ def test_right_side_guard_pushes_left():
 
 
 @pytest.mark.parametrize('bad', [{'mode': 'middle'}, {'speed_mode': 'fast'},
-                                 {'step_speeds': '2'}, {'v_full_throttle': 0.0}])
+                                 {'step_speeds': '2'}, {'v_full_throttle': 0.0},
+                                 {'traction_slip': 0.1, 'traction_offset': 0.0}])
 def test_validate_rejects_bad_params(bad):
     with pytest.raises(ValueError):
         validate(Params(**bad))

@@ -1,0 +1,16 @@
+# Fallback: the hand-tuned configuration (7.10 s mean flying lap, more steering margin).
+# Use if the default (CMA-ES tuned) configuration misbehaves, e.g. in GUI mode:
+#   ros2 run autodrive_roboracer wall_follow_node --ros-args --params-file \
+#     /home/autodrive_devkit/src/autodrive_devkit/config/hand_tuned.yaml
+wall_follow_node:
+  ros__parameters:
+    v_max: 7.0
+    lat_accel: 6.5
+    brake_decel: 4.0
+    v_corner: 0.0
+    stop_margin: 0.5
+    preview_gain: 0.3
+    kp: 0.9
+    lookahead: 0.5
+    traction_slip: 0.0
+    side_clearance: 0.35

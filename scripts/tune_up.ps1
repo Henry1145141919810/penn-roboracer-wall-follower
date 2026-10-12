@@ -1,6 +1,6 @@
 # Start headless simulator(s), each with its own container + bridge, for tools/tune.py.
-# Use n = 1: several simulators on one PC change the simulator's behaviour (LiDAR at
-# ~190 new scans/s instead of 40, and configs that are clean alone crash), see tools/tune.py.
+# Each container gets its own ROS_DOMAIN_ID: containers on the same Docker network otherwise
+# discover each other's topics and the cars receive each other's commands (see tools/tune.py).
 # Worker k uses container penn-tune-k and host port 4566+k. The simulator must be started
 # BEFORE its bridge: if the bridge is up first, the simulator's first message has no LiDAR
 # data, the (unmodified) bridge raises KeyError and the connection stalls.
@@ -19,7 +19,7 @@ if ($n -eq 0) { Get-Process 'AutoDRIVE Simulator' -ErrorAction SilentlyContinue 
 
 for ($k = 1; $k -le $n; $k++) {
   $port = 4566 + $k
-  docker run -d --platform linux/amd64 --name "penn-tune-$k" -p "${port}:4567" `
+  docker run -d --platform linux/amd64 --name "penn-tune-$k" -p "${port}:4567" -e "ROS_DOMAIN_ID=$(10 + $k)" `
     -v "${repo}/autodrive_devkit:/home/autodrive_devkit/src/autodrive_devkit" -v "${repo}:/work" `
     --entrypoint /bin/bash penn-challenge -c 'sleep infinity' | Out-Null
   docker exec "penn-tune-$k" bash -c 'source /opt/ros/humble/setup.bash && cd /home/autodrive_devkit && colcon build > /dev/null 2>&1 && pip3 install -q cma==3.3.0 > /dev/null 2>&1'

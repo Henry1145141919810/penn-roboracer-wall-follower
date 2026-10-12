@@ -183,7 +183,7 @@ def test_steps_mode_is_textbook_schedule():
 
 
 def test_const_mode_and_speed_feedback():
-    p = Params(speed_mode='const', v_const=2.0, speed_kp=0.1)
+    p = Params(speed_mode='const', v_const=2.0, speed_kp=0.1, traction_slip=0.0)
     throttle, _, _ = run(WallFollowController(p), corridor_scan(0.8, 0.8), speed=1.0)
     assert throttle == pytest.approx(2.0 / 25.0 + 0.1 * (2.0 - 1.0))
 
@@ -217,7 +217,7 @@ def test_cast_param_accepts_ros_types():
 
 
 def test_republished_scan_keeps_steering_and_refreshes_throttle():
-    p = Params(speed_kp=0.2)
+    p = Params(speed_kp=0.2, traction_slip=0.0)
     c = WallFollowController(p)
     scan = corridor_scan(0.5, 1.1)
     thr1, steer1, _ = c.step(scan, ANGLE_MIN, ANGLE_INC, RANGE_MAX, 0.000, speed=2.0)
@@ -282,3 +282,19 @@ def test_preview_steers_earlier_into_the_bend(turn):
     _, steer_off, _ = run(WallFollowController(Params(preview_gain=0.0)), scan)
     _, steer_on, _ = run(WallFollowController(Params(preview_gain=0.4)), scan)
     assert turn * (steer_on - steer_off) > 0.05
+
+
+def test_traction_control_caps_wheel_speed_at_low_speed():
+    p = Params(traction_slip=0.1, traction_offset=0.5)
+    throttle, _, _ = run(WallFollowController(p), corridor_scan(0.8, 0.8), speed=2.0)
+    assert throttle == pytest.approx((2.0 * 1.1 + 0.5) / 25.0)
+    throttle_off, _, _ = run(WallFollowController(Params(traction_slip=0.0)),
+                             corridor_scan(0.8, 0.8), speed=2.0)
+    assert throttle_off > throttle
+
+
+def test_corner_speed_raises_braking_limit():
+    scan = corridor_scan(0.8, 0.8, front=1.5)
+    _, _, slow = run(WallFollowController(Params(v_corner=0.0)), scan)
+    _, _, fast = run(WallFollowController(Params(v_corner=2.0)), scan)
+    assert fast['v_target'] > slow['v_target']

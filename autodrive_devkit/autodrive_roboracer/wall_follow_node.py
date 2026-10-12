@@ -60,29 +60,30 @@ class Params:
     mode: str = 'center'  # 'center', 'left' or 'right'
     wall_distance: float = 0.8  # m, target distance in 'left'/'right' mode
     beam_angle: float = 50.0  # deg between the two beams of each wall fit
-    lookahead: float = 0.5  # m, project the lateral error this far ahead ...
+    lookahead: float = 0.26  # m, project the lateral error this far ahead ...
     lookahead_per_speed: float = 0.15  # ... plus this many metres per m/s of speed
-    kp: float = 0.9  # rad of steering per m of error
+    kp: float = 0.42  # rad of steering per m of error
     ki: float = 0.0
     kd: float = 0.03
     d_filter_tau: float = 0.05  # s, low-pass on the error derivative
     max_wall_angle: float = 45.0  # deg, clamp on the fitted wall angle (rejects bad fits)
     max_error: float = 0.8  # m, clamp on the lateral error (track is ~1.5 m wide)
     steer_tau: float = 0.0  # s, low-pass on the steering command (0 = off)
-    preview_gain: float = 0.3  # m of error per rad towards the deepest free direction
+    preview_gain: float = 0.27  # m of error per rad towards the deepest free direction
     preview_fov: float = 60.0  # deg, half-width of the sector searched for that direction
     use_side_guard: bool = True
-    side_clearance: float = 0.35  # m, push away from walls closer than this
+    side_clearance: float = 0.37  # m, push away from walls closer than this
     side_gain: float = 2.0  # rad per m of intrusion
     # Speed (m/s targets, turned into throttle below)
     speed_mode: str = 'adaptive'  # 'adaptive', 'steps' or 'const'
-    v_max: float = 7.0  # m/s on open straights
+    v_max: float = 7.34  # m/s on open straights
     v_min: float = 1.0  # m/s floor so the car never stalls
     v_const: float = 1.5  # m/s in 'const' mode
     step_speeds: str = '1.5,1.0,0.5'  # m/s for |steer| < 10 deg, < 20 deg, above
-    brake_decel: float = 4.0  # m/s^2 assumed braking for the clearance limit
-    lat_accel: float = 6.5  # m/s^2 allowed lateral acceleration (measured grip ~6-7)
-    stop_margin: float = 0.5  # m kept in front when braking to a stop
+    brake_decel: float = 6.0  # m/s^2 assumed braking (measured ~6 m/s^2)
+    v_corner: float = 0.66  # m/s braking aims for this speed at the obstacle, not a full stop
+    lat_accel: float = 7.8  # m/s^2 allowed lateral acceleration (CMA-ES tuned)
+    stop_margin: float = 0.52  # m kept in front when braking to a stop
     car_half_width: float = 0.25  # m, corridor half width for the clearance check
     clearance_mode: str = 'arc'  # 'arc' (along the steering arc) or 'straight'
     # Throttle mapping: throttle = v_target / v_full_throttle + speed_kp * error.
@@ -91,6 +92,11 @@ class Params:
     speed_kp: float = 0.2  # throttle per m/s of speed error (needs odometry)
     max_throttle: float = 1.0
     min_throttle: float = -1.0
+    # Traction control: throttle sets wheel speed, and full throttle from low speed spins the
+    # wheels (measured: 5.4 m/s after 1.2 s, vs 7.4 m/s with the wheel speed capped 10 % above
+    # the car's speed). Cap = speed * (1 + traction_slip) + traction_offset. 0 = off.
+    traction_slip: float = 0.18
+    traction_offset: float = 0.5  # m/s, lets the car start from standstill
 
 
 def cast_param(field, value):
@@ -297,6 +303,9 @@ class WallFollowController:
         throttle = v_target / p.v_full_throttle
         if speed is not None and p.speed_kp > 0.0:
             throttle += p.speed_kp * (v_target - speed)
+        if speed is not None and p.traction_slip > 0.0:
+            cap = (max(speed, 0.0) * (1.0 + p.traction_slip) + p.traction_offset)
+            throttle = min(throttle, cap / p.v_full_throttle)
         return float(np.clip(throttle, p.min_throttle, p.max_throttle))
 
     def _new_scan(self, raw, angle_min, angle_increment, range_max, stamp, speed):
@@ -356,7 +365,8 @@ class WallFollowController:
         else:
             clearance = forward_clearance(r, angles, p.car_half_width)
         if p.speed_mode == 'adaptive':
-            v_brake = math.sqrt(2.0 * p.brake_decel * max(clearance - p.stop_margin, 0.0))
+            room = max(clearance - p.stop_margin, 0.0)
+            v_brake = math.sqrt(p.v_corner ** 2 + 2.0 * p.brake_decel * room)
             k = abs(curvature)
             v_turn = math.sqrt(p.lat_accel / k) if k > 1e-6 else p.v_max
             v_target = max(min(p.v_max, v_brake, v_turn), p.v_min)

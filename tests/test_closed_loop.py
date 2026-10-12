@@ -57,3 +57,10 @@ def test_pursuit_mode_tolerates_latency_and_noise():
     p = Params(steer_mode='pursuit', preview_gain=0.0, kp=0.15)
     assert simulate(p, laps=1, latency=12)['status'] == 'ok'
     assert simulate(p, laps=1, noise=0.02)['status'] == 'ok'
+
+
+@pytest.mark.parametrize('mirror', [False, True], ids=['clockwise', 'counter_clockwise'])
+def test_pursuit_wall_law_completes_laps_in_both_directions(mirror):
+    p = Params(steer_law='pursuit_wall', inside_offset=0.3, preview_gain=0.0)
+    result = simulate(p, laps=2, mirror=mirror)
+    assert result['status'] == 'ok', result

@@ -12,48 +12,46 @@ time lost to that ideal is reported per segment, with the limiting factor.
 
 import argparse
 import csv
-import math
 
 import numpy as np
 
-from lap_bound import curvature, resample_closed, smooth_closed
+from lap_bound import curvature, resample_open, smooth_open, speed_profile
 
 
 def load_lap(path, lap_index=1):
+    """Return the lap plus the one before it (as lead-in, so the join is not an artifact)."""
     with open(path) as f:
         rows = list(csv.DictReader(f))
     lap0 = int(rows[0]['lap_count'])
+    lead = [r for r in rows if int(r['lap_count']) == lap0 + lap_index - 1]
     lap = [r for r in rows if int(r['lap_count']) == lap0 + lap_index]
-    t = np.array([float(r['t']) for r in lap])
-    xy = np.array([[float(r['x']), float(r['y'])] for r in lap])
-    v = np.array([float(r['speed']) for r in lap])
-    yaw = np.unwrap(np.array([float(r['yaw']) for r in lap]))
+    both = lead + lap
+    t = np.array([float(r['t']) for r in both])
+    xy = np.array([[float(r['x']), float(r['y'])] for r in both])
+    v = np.array([float(r['speed']) for r in both])
+    yaw = np.unwrap(np.array([float(r['yaw']) for r in both]))
     keep = np.r_[True, np.linalg.norm(np.diff(xy, axis=0), axis=1) > 1e-4]
-    return t[keep], xy[keep], v[keep], yaw[keep], lap
+    start = int(np.sum(keep[:len(lead)]))
+    return t[keep], xy[keep], v[keep], yaw[keep], start
 
 
-def ideal_profile(xy, a_lat, a_acc, a_brake, v_max, step):
-    path = smooth_closed(resample_closed(xy, step), 6)
+def ideal_profile(xy, start, a_lat, a_acc, a_brake, v_max, step):
+    """Profile on the open two-lap path; returns only the part from ``start`` (the lap)."""
+    path = smooth_open(resample_open(xy, step), 6)
     k = curvature(path)
+    k[0] = k[-1] = 0.0
     v_grip = np.minimum(np.sqrt(a_lat / np.maximum(k, 1e-6)), v_max)
-    v = v_grip.copy()
-    n = len(v)
-    for _ in range(2):
-        for i in range(1, 2 * n):
-            j, prev = i % n, (i - 1) % n
-            v[j] = min(v[j], math.sqrt(v[prev] ** 2 + 2 * a_acc * step))
-        for i in range(2 * n - 2, -1, -1):
-            j, nxt = i % n, (i + 1) % n
-            v[j] = min(v[j], math.sqrt(v[nxt] ** 2 + 2 * a_brake * step))
+    v = speed_profile(k, a_lat, a_acc, a_brake, v_max, step, closed=False)
     limit = np.where(v >= v_grip - 1e-6, 'grip', 'accel/brake')
     limit = np.where(v >= v_max - 1e-6, 'v_max', limit)
-    return path, k, v, limit
+    first = int(np.argmin(np.sum((path - xy[start]) ** 2, axis=1)))
+    return path[first:], k[first:], v[first:], limit[first:]
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('trace')
-    ap.add_argument('--lap', type=int, default=1, help='1 = first flying lap')
+    ap.add_argument('--lap', type=int, default=2, help='2 = second flying lap (default)')
     ap.add_argument('--a-lat', type=float, default=8.0)
     ap.add_argument('--a-acc', type=float, default=6.0)
     ap.add_argument('--a-brake', type=float, default=6.0)
@@ -61,9 +59,9 @@ def main():
     ap.add_argument('--segment', type=float, default=2.0, help='m of path per report row')
     args = ap.parse_args()
 
-    t, xy, v, yaw, rows = load_lap(args.trace, args.lap)
+    t, xy, v, yaw, start = load_lap(args.trace, args.lap)
     step = 0.05
-    path, k, v_ideal, limit = ideal_profile(xy, args.a_lat, args.a_acc, args.a_brake,
+    path, k, v_ideal, limit = ideal_profile(xy, start, args.a_lat, args.a_acc, args.a_brake,
                                             args.v_max, step)
     # actual speed sampled onto the resampled path (nearest driven point)
     idx = np.array([np.argmin(np.sum((xy - p) ** 2, axis=1)) for p in path])
@@ -71,6 +69,7 @@ def main():
     dt_act, dt_ideal = step / v_act, step / v_ideal
     yaw_rate = np.gradient(yaw, t)
     a_lat_act = np.abs(yaw_rate * v)
+    t, v, yaw = t[start:], v[start:], yaw[start:]
     print(f'{args.trace}: lap {t[-1] - t[0]:.2f} s measured, path {len(path) * step:.1f} m, '
           f'ideal on this path {dt_ideal.sum():.2f} s '
           f'(a_lat {args.a_lat}, accel {args.a_acc}, brake {args.a_brake})')

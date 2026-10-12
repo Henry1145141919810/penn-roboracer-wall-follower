@@ -59,6 +59,20 @@ class Params:
     # Steering
     mode: str = 'center'  # 'center', 'left' or 'right'
     steer_mode: str = 'pd'  # 'pd' (PD on the lateral error) or 'pursuit' (see below)
+    # Steering law for the wall-centring error. 'pd': delta = kp * error (fixed gain).
+    # 'pursuit_wall': pure-pursuit geometry on the same error, delta = steer_gain *
+    # atan(WB * 2 * error / L_d^2), i.e. the arc that reaches the corridor midline L_d ahead.
+    # The gain falls with speed (L_d grows), so hairpins get the steering they need without
+    # the straights becoming twitchy. L_d is floored at lookahead_min.
+    steer_law: str = 'pd'
+    steer_gain: float = 0.9
+    lookahead_min: float = 0.45  # m
+    # Inside line: a bounded offset towards the inside of the coming turn (sign of the deepest
+    # free direction), saturating with tanh and never closer than inner_clearance_min to the
+    # inner wall. Replaces the linear preview when inside_offset > 0.
+    inside_offset: float = 0.0  # m, 0 = off
+    inside_alpha: float = 0.6  # rad, turn angle at which the offset is 76 % saturated
+    inner_clearance_min: float = 0.45  # m
     wall_distance: float = 0.8  # m, target distance in 'left'/'right' mode
     beam_angle: float = 50.0  # deg between the two beams of each wall fit
     lookahead: float = 0.26  # m, project the lateral error this far ahead ...
@@ -124,6 +138,7 @@ def validate(params):
     """Raise ValueError if a parameter set cannot be used."""
     choices = {'mode': ('center', 'left', 'right'),
                'steer_mode': ('pd', 'pursuit'),
+               'steer_law': ('pd', 'pursuit_wall'),
                'speed_mode': ('adaptive', 'steps', 'const'),
                'clearance_mode': ('arc', 'straight')}
     for name, allowed in choices.items():
@@ -395,11 +410,22 @@ class WallFollowController:
         # Steering: PD on the lateral error projected ahead of the car.
         v_now = speed if speed is not None else self.v_estimate
         lookahead = p.lookahead + p.lookahead_per_speed * max(v_now, 0.0)
+        if p.steer_law == 'pursuit_wall':
+            lookahead = max(lookahead, p.lookahead_min)
         error, branch = self.lateral_error(r, angle_min, angle_increment, range_max,
                                            lookahead, dt)
+        left_min = side_minimum(r, angles, +1)
+        right_min = side_minimum(r, angles, -1)
         deepest = deepest_direction(r, angles, p.preview_fov)
         if p.preview_gain > 0.0:  # steer early towards where the track turns
             error += p.preview_gain * deepest
+        e_ref = 0.0
+        if p.inside_offset > 0.0:  # bounded target offset towards the inside of the turn
+            e_ref = p.inside_offset * math.tanh(deepest / p.inside_alpha)
+            d_inner = left_min if deepest > 0.0 else right_min
+            room = max(d_inner - p.inner_clearance_min, 0.0)
+            e_ref = float(np.clip(e_ref, -room, room))
+            error += e_ref
         error = float(np.clip(error, -p.max_error, p.max_error))
         if self.prev_error is None or branch != self.prev_branch:
             self.d_filtered = 0.0  # no derivative across a change of reference wall
@@ -410,7 +436,12 @@ class WallFollowController:
         self.integral = float(np.clip(self.integral + error * dt, -1.0, 1.0))
         self.prev_error = error
         self.prev_branch = branch
-        delta = p.kp * error + p.kd * self.d_filtered + p.ki * self.integral
+        if p.steer_law == 'pursuit_wall':
+            kappa = 2.0 * error / lookahead ** 2
+            delta = p.steer_gain * math.atan(WHEELBASE * kappa)
+        else:
+            delta = p.kp * error
+        delta += p.kd * self.d_filtered + p.ki * self.integral
         aim = None
         if p.steer_mode == 'pursuit':
             # Geometric feed-forward: the arc that reaches the aim point.
@@ -428,8 +459,6 @@ class WallFollowController:
             aim = (theta, L_used)
 
         # Side guard: push away from a wall that is too close.
-        left_min = side_minimum(r, angles, +1)
-        right_min = side_minimum(r, angles, -1)
         if p.use_side_guard:
             if left_min < p.side_clearance:
                 delta -= p.side_gain * (p.side_clearance - left_min)
@@ -464,6 +493,7 @@ class WallFollowController:
         self.v_estimate = v_target
 
         info = {'error': error, 'branch': branch, 'clearance': clearance, 'aim': aim,
+                'e_ref': e_ref, 'lookahead': lookahead,
                 'v_target': v_target, 'left_min': left_min, 'right_min': right_min,
                 'track_width': self.track_width}
         return steer, v_target, info

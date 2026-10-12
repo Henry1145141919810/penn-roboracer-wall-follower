@@ -341,3 +341,42 @@ def test_pursuit_mode_steers_into_the_bend(turn):
     assert info['aim'] is not None and turn * info['aim'][0] > 0
     _, steer0, _ = run(WallFollowController(p), corridor_scan(0.8, 0.8))
     assert abs(steer0) < 0.05
+
+
+def test_pursuit_wall_law_matches_pd_at_the_equivalent_gain():
+    # On a straight corridor with a fixed lookahead the two laws must agree when
+    # kp = steer_gain * 2 * WB / L^2 (small-angle), and both must be zero when centred.
+    L = 1.0
+    pd = Params(lookahead=L, lookahead_per_speed=0.0, kp=0.9 * 2 * 0.33 / L ** 2,
+                preview_gain=0.0, use_side_guard=False)
+    pw = Params(lookahead=L, lookahead_per_speed=0.0, steer_law='pursuit_wall', steer_gain=0.9,
+                preview_gain=0.0, use_side_guard=False)
+    scan = corridor_scan(0.7, 0.9)
+    _, s_pd, _ = run(WallFollowController(pd), scan)
+    _, s_pw, _ = run(WallFollowController(pw), scan)
+    assert s_pw == pytest.approx(s_pd, abs=0.01)
+    assert abs(run(WallFollowController(pw), corridor_scan(0.8, 0.8))[1]) < 0.02
+
+
+def test_pursuit_wall_gain_falls_with_speed():
+    pw = Params(steer_law='pursuit_wall', preview_gain=0.0, use_side_guard=False)
+    scan = corridor_scan(1.0, 0.6)  # right wall close -> steer left (positive)
+    _, slow, _ = run(WallFollowController(pw), scan, speed=2.0)
+    _, fast, _ = run(WallFollowController(pw), scan, speed=7.0)
+    assert slow > fast > 0.0
+
+
+@pytest.mark.parametrize('turn', [+1, -1])
+def test_inside_offset_moves_the_target_inside_and_respects_clearance(turn):
+    p = Params(inside_offset=0.3, inner_clearance_min=0.45, preview_gain=0.0,
+               use_side_guard=False)
+    scan = circle_scan(1.0, 2.0, turn)
+    _, _, info = run(WallFollowController(p), scan)
+    assert turn * info['e_ref'] > 0.05  # towards the inside of the bend
+    inner = min(scan[(turn * ANGLES > math.radians(20)) & (turn * ANGLES < math.radians(160))])
+    assert abs(info['e_ref']) <= inner - 0.45 + 1e-9
+    # A corridor with the inner wall already close leaves no room for an offset.
+    tight = Params(inside_offset=0.3, inner_clearance_min=0.45, preview_gain=0.0)
+    scan2 = corridor_scan(0.5, 1.1) if turn > 0 else corridor_scan(1.1, 0.5)
+    _, _, info2 = run(WallFollowController(tight), scan2)
+    assert abs(info2['e_ref']) <= 0.05 + 1e-9

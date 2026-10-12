@@ -32,7 +32,8 @@ ROOT = os.path.join(TOOLS, '..', 'runs', 'tune')
 CRASH_SCORE = 12.0  # s; worse than any clean lap seen so far
 
 # name: (low, high, start). Start = the hand-tuned config plus traction control.
-SPACE = {
+SPACES = {}
+SPACES['pd'] = SPACE = {
     'v_max': (6.0, 9.0, 7.0),
     'lat_accel': (5.5, 8.0, 6.5),
     'brake_decel': (3.0, 8.0, 4.0),
@@ -44,11 +45,27 @@ SPACE = {
     'traction_slip': (0.05, 0.3, 0.1),
     'side_clearance': (0.25, 0.4, 0.35),
 }
+# Pursuit steering (steer_mode=pursuit, preview_gain=0 fixed). Start = first working probe.
+SPACES['pursuit'] = {
+    'pursuit_lookahead': (1.0, 3.0, 2.0),
+    'pursuit_lookahead_per_speed': (0.0, 0.4, 0.2),
+    'pursuit_min_lookahead': (0.4, 1.2, 0.6),
+    'kp': (0.05, 0.5, 0.15),
+    'apex_shift': (0.0, 0.3, 0.0),
+    'disparity_margin': (0.0, 0.15, 0.05),
+    'v_max': (6.5, 9.5, 7.34),
+    'lat_accel': (6.5, 8.5, 7.8),
+    'brake_decel': (4.0, 8.0, 6.0),
+    'v_corner': (0.0, 3.0, 0.66),
+    'stop_margin': (0.2, 0.8, 0.52),
+    'traction_slip': (0.05, 0.3, 0.18),
+}
+FIXED = {}  # parameters held constant during a search (--fixed name=value)
 
 
 def to_params(x):
-    """Map a point of the unit cube to parameter values."""
-    out = {}
+    """Map a point of the unit cube to parameter values (plus the fixed ones)."""
+    out = dict(FIXED)
     for xi, (name, (lo, hi, _)) in zip(x, SPACE.items()):
         out[name] = round(lo + min(max(xi, 0.0), 1.0) * (hi - lo), 4)
     return out
@@ -96,8 +113,14 @@ def score(result):
     return sum(flying) / len(flying)
 
 
-def optimise(workers, generations, popsize, sigma, tag='tune', start=None, bounds=()):
+def optimise(workers, generations, popsize, sigma, tag='tune', start=None, bounds=(),
+             space='pd', fixed=()):
     import cma
+    global SPACE
+    SPACE = SPACES[space]
+    for item in fixed:
+        name, value = item.split('=')
+        FIXED[name] = value
     for item in bounds:  # e.g. kp=0.3:1.0 widens or moves a range
         name, rng = item.split('=')
         lo, hi = (float(v) for v in rng.split(':'))
@@ -160,12 +183,15 @@ def main():
     o.add_argument('--tag', default='tune', help='label prefix (must differ between runs)')
     o.add_argument('--start', default='', help='JSON dict of start values')
     o.add_argument('--bounds', nargs='*', default=[], help='name=low:high overrides')
+    o.add_argument('--space', default='pd', choices=sorted(SPACES))
+    o.add_argument('--fixed', nargs='*', default=[], help='name=value held constant')
     args = ap.parse_args()
     if args.cmd == 'worker':
         worker(args.wid)
     else:
         optimise(args.workers, args.generations, args.popsize, args.sigma, args.tag,
-                 json.loads(args.start) if args.start else None, args.bounds)
+                 json.loads(args.start) if args.start else None, args.bounds, args.space,
+                 args.fixed)
 
 
 if __name__ == '__main__':

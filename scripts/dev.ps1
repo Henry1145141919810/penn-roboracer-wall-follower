@@ -31,6 +31,17 @@ switch ($cmd) {
     $extra = if ($rest) { '--ros-args ' + ($rest -join ' ') } else { '' }
     docker exec -it $name bash -c "$ros && ros2 run autodrive_roboracer wall_follow_node $extra"
   }
+  'headless' {
+    # Headless simulator for automated laps. Order matters: simulator first, then the bridge.
+    docker exec $name bash -c "pkill -INT -f '[a]utodrive_bridge'; pkill -INT -f '[r]os2 launch'; sleep 1" 2>$null
+    Get-Process 'AutoDRIVE Simulator' -ErrorAction SilentlyContinue | Stop-Process -Force
+    $sim = (Resolve-Path "$repo\..\simulator\autodrive_simulator\AutoDRIVE Simulator.exe").Path
+    Start-Process -FilePath $sim -ArgumentList '-batchmode', '-nographics', '-ip', '127.0.0.1', '-port', '4567'
+    Start-Sleep -Seconds 20
+    docker exec -d $name bash -c "$ros && ros2 launch autodrive_roboracer bringup_headless.launch.py > /work/runs/bridge.log 2>&1"
+    Start-Sleep -Seconds 12
+    docker exec $name bash -c "$ros && timeout 4 ros2 topic hz /autodrive/roboracer_1/odom 2>&1 | grep average | tail -1"
+  }
   'shell' { docker exec -it $name bash -c "$ros; exec bash" }
   'test'  { docker exec $name bash -c "$ros && cd /work && python3 -m pytest -q tests autodrive_devkit/test/test_wall_follow.py" }
   'down'  { docker rm -f $name }

@@ -14,7 +14,8 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from autodrive_roboracer.wall_follow_node import (  # noqa: E402
     MAX_STEER_RAD, Params, WallFollowController, arc_clearance, beam_index, cast_param,
-    clean_ranges, deepest_direction, forward_clearance, validate, wall_estimate)
+    clean_ranges, deepest_direction, extend_disparities, forward_clearance, pursuit_target,
+    validate, wall_estimate)
 
 ANGLE_MIN = -2.35619
 ANGLE_INC = 0.004363323
@@ -299,3 +300,44 @@ def test_corner_speed_raises_braking_limit():
     _, _, slow = run(WallFollowController(Params(v_corner=0.0)), scan)
     _, _, fast = run(WallFollowController(Params(v_corner=2.0)), scan)
     assert fast['v_target'] > slow['v_target']
+
+
+def test_disparity_extender_closes_gaps_narrower_than_the_car():
+    # A 0.3 m wide slot straight ahead at 2 m between walls at 2 m: too narrow for the car.
+    scan = np.full(N_BEAMS, 2.0)
+    slot = np.abs(ANGLES) < math.atan(0.15 / 2.0)
+    scan[slot] = 10.0
+    ext = extend_disparities(scan, ANGLE_INC, 0.25, 0.3)
+    assert ext[540] == pytest.approx(2.0)  # closed
+    # A 1.0 m wide opening stays open in the middle.
+    wide = np.abs(ANGLES) < math.atan(0.5 / 2.0)
+    scan2 = np.full(N_BEAMS, 2.0)
+    scan2[wide] = 10.0
+    ext2 = extend_disparities(scan2, ANGLE_INC, 0.25, 0.3)
+    assert ext2[540] == pytest.approx(10.0)
+    assert ext2[wide].min() == pytest.approx(2.0)  # but its edges are narrowed
+
+
+def test_pursuit_target_centre_of_corridor_and_bend():
+    theta, L = pursuit_target(corridor_scan(0.8, 0.8), ANGLES, 2.0, 0.6, 90.0, 0.0)
+    assert abs(theta) < 0.02 and L == 2.0
+    for turn in (+1, -1):
+        scan = circle_scan(1.0, 2.0, turn)
+        hint = deepest_direction(scan, ANGLES, 60.0)
+        theta, L = pursuit_target(scan, ANGLES, 2.0, 0.6, 90.0, hint)
+        assert turn * theta > 0.1  # aims into the bend ...
+        kappa = 2 * math.sin(abs(theta)) / L  # ... with the ring's curvature (radius 1.5)
+        assert kappa == pytest.approx(1 / 1.5, rel=0.25)
+    # Blocked ahead: the range shrinks instead of giving up.
+    theta, L = pursuit_target(corridor_scan(0.8, 0.8, front=1.0), ANGLES, 3.0, 0.6, 90.0, 0.0)
+    assert L < 1.3  # the far corners of the box are 1.28 m away
+
+
+@pytest.mark.parametrize('turn', [+1, -1])
+def test_pursuit_mode_steers_into_the_bend(turn):
+    p = Params(steer_mode='pursuit', preview_gain=0.0)
+    _, steer, info = run(WallFollowController(p), circle_scan(1.0, 2.0, turn))
+    assert turn * steer > 0.2
+    assert info['aim'] is not None and turn * info['aim'][0] > 0
+    _, steer0, _ = run(WallFollowController(p), corridor_scan(0.8, 0.8))
+    assert abs(steer0) < 0.05

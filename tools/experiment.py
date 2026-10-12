@@ -70,6 +70,7 @@ class Runner(Node):
         self.create_subscription(Float32, NS + 'lap_time', self.on_laptime, qos)
         self.controller = None
         self.external = False
+        self.fixed_steer = None  # sysid: override the controller's steering
         self.raw_throttle = None
         self.active = False
         self.speed = 0.0
@@ -132,6 +133,8 @@ class Runner(Node):
             throttle, steer, info = self.controller.step(
                 msg.ranges, msg.angle_min, msg.angle_increment, msg.range_max,
                 stamp, self.speed)
+        if self.fixed_steer is not None:
+            steer = self.fixed_steer
         self.send(throttle, steer)
         if self.save_every and self.scans % self.save_every == 0:
             self.saved.append((self.pose, list(msg.ranges)))

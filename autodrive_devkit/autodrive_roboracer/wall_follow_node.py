@@ -58,6 +58,7 @@ class Params:
 
     # Steering
     mode: str = 'center'  # 'center', 'left' or 'right'
+    steer_mode: str = 'pd'  # 'pd' (PD on the lateral error) or 'pursuit' (see below)
     wall_distance: float = 0.8  # m, target distance in 'left'/'right' mode
     beam_angle: float = 50.0  # deg between the two beams of each wall fit
     lookahead: float = 0.26  # m, project the lateral error this far ahead ...
@@ -71,6 +72,16 @@ class Params:
     steer_tau: float = 0.0  # s, low-pass on the steering command (0 = off)
     preview_gain: float = 0.27  # m of error per rad towards the deepest free direction
     preview_fov: float = 60.0  # deg, half-width of the sector searched for that direction
+    # Pursuit steering: aim at the centre of the free sector at a lookahead range with
+    # pure-pursuit geometry (curvature = 2 sin(theta) / L). The scan is first disparity-
+    # extended by the car's half width, so a "free" direction is one the car fits through.
+    # The PD centring term (kp) and the side guard still apply on top.
+    pursuit_lookahead: float = 1.2  # m at standstill ...
+    pursuit_lookahead_per_speed: float = 0.2  # ... plus this many metres per m/s
+    pursuit_min_lookahead: float = 0.6  # m, shrink to this when nothing is free further out
+    disparity_threshold: float = 0.3  # m, range jump between neighbours that marks an edge
+    disparity_margin: float = 0.05  # m added to the half width when extending edges
+    apex_shift: float = 0.0  # m, move the aim point towards the inside of the turn
     use_side_guard: bool = True
     side_clearance: float = 0.37  # m, push away from walls closer than this
     side_gain: float = 2.0  # rad per m of intrusion
@@ -112,6 +123,7 @@ def cast_param(field, value):
 def validate(params):
     """Raise ValueError if a parameter set cannot be used."""
     choices = {'mode': ('center', 'left', 'right'),
+               'steer_mode': ('pd', 'pursuit'),
                'speed_mode': ('adaptive', 'steps', 'const'),
                'clearance_mode': ('arc', 'straight')}
     for name, allowed in choices.items():
@@ -205,6 +217,61 @@ def deepest_direction(ranges, angles, fov_deg):
     r = np.convolve(ranges, np.ones(5) / 5.0, mode='same')[sector]
     far = r >= 0.9 * np.max(r)
     return float(np.mean(angles[sector][far]))
+
+
+def extend_disparities(ranges, angle_increment, half_width, threshold):
+    """Otterness-style disparity extender.
+
+    Wherever two neighbouring beams differ by more than ``threshold``, the
+    nearer range is copied over the beams on the far side that the car's half
+    width would sweep at that distance. A direction left "free" afterwards is
+    one the car fits through without clipping the edge.
+    """
+    r = ranges.copy()
+    n = len(r)
+    jumps = np.flatnonzero(np.abs(np.diff(ranges)) > threshold)
+    for i in jumps:
+        if ranges[i] < ranges[i + 1]:
+            near, start, step = ranges[i], i + 1, +1
+        else:
+            near, start, step = ranges[i + 1], i, -1
+        if near < 1e-3:
+            continue
+        width = int(math.asin(min(1.0, half_width / near)) / angle_increment) + 1
+        if step > 0:
+            lo, hi = start, min(n, start + width)
+        else:
+            lo, hi = max(0, start - width + 1), start + 1
+        r[lo:hi] = np.minimum(r[lo:hi], near)
+    return r
+
+
+def pursuit_target(ranges, angles, lookahead, min_lookahead, fov_deg, hint):
+    """Aim point for pure pursuit: centre of the free sector at range ``lookahead``.
+
+    Free beams are those longer than the lookahead within +-fov. Of the
+    contiguous free sectors, the one containing ``hint`` (the deepest
+    direction) is used, or else the one closest to it. If nothing is free at
+    that range the range shrinks, down to ``min_lookahead``.
+    Returns ``(theta, range_used)``; ``theta`` falls back to ``hint``.
+    """
+    fov = math.radians(fov_deg)
+    in_fov = np.abs(angles) < fov
+    L = lookahead
+    while L >= min_lookahead:
+        free = in_fov & (ranges > L)
+        if np.any(free):
+            edges = np.flatnonzero(np.diff(np.r_[False, free, False]))
+            starts, stops = edges[::2], edges[1::2]
+            best = None
+            for a, b in zip(starts, stops):
+                lo, hi = angles[a], angles[b - 1]
+                dist = 0.0 if lo <= hint <= hi else min(abs(lo - hint), abs(hi - hint))
+                if best is None or dist < best[0]:
+                    best = (dist, 0.5 * (lo + hi))
+            return float(best[1]), L
+        L *= 0.8
+    return float(hint), min_lookahead
 
 
 def side_minimum(ranges, angles, side, lo_deg=20.0, hi_deg=160.0):
@@ -330,8 +397,9 @@ class WallFollowController:
         lookahead = p.lookahead + p.lookahead_per_speed * max(v_now, 0.0)
         error, branch = self.lateral_error(r, angle_min, angle_increment, range_max,
                                            lookahead, dt)
+        deepest = deepest_direction(r, angles, p.preview_fov)
         if p.preview_gain > 0.0:  # steer early towards where the track turns
-            error += p.preview_gain * deepest_direction(r, angles, p.preview_fov)
+            error += p.preview_gain * deepest
         error = float(np.clip(error, -p.max_error, p.max_error))
         if self.prev_error is None or branch != self.prev_branch:
             self.d_filtered = 0.0  # no derivative across a change of reference wall
@@ -343,6 +411,21 @@ class WallFollowController:
         self.prev_error = error
         self.prev_branch = branch
         delta = p.kp * error + p.kd * self.d_filtered + p.ki * self.integral
+        aim = None
+        if p.steer_mode == 'pursuit':
+            # Geometric feed-forward: the arc that reaches the aim point.
+            L_d = p.pursuit_lookahead + p.pursuit_lookahead_per_speed * max(v_now, 0.0)
+            r_ext = extend_disparities(r, angle_increment,
+                                       p.car_half_width + p.disparity_margin,
+                                       p.disparity_threshold)
+            theta, L_used = pursuit_target(r_ext, angles, L_d, p.pursuit_min_lookahead,
+                                           90.0, deepest)
+            if p.apex_shift > 0.0 and abs(theta) > 0.05:
+                theta = math.atan2(L_used * math.sin(theta) + math.copysign(p.apex_shift, theta),
+                                   L_used * math.cos(theta))
+            kappa = 2.0 * math.sin(theta) / L_used
+            delta += math.atan(kappa * WHEELBASE)
+            aim = (theta, L_used)
 
         # Side guard: push away from a wall that is too close.
         left_min = side_minimum(r, angles, +1)
@@ -380,7 +463,7 @@ class WallFollowController:
             v_target = p.v_const
         self.v_estimate = v_target
 
-        info = {'error': error, 'branch': branch, 'clearance': clearance,
+        info = {'error': error, 'branch': branch, 'clearance': clearance, 'aim': aim,
                 'v_target': v_target, 'left_min': left_min, 'right_min': right_min,
                 'track_width': self.track_width}
         return steer, v_target, info

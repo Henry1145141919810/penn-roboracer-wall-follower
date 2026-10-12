@@ -1,0 +1,18 @@
+# colcon outputs
+build/
+install/
+log/
+
+# simulator, archives, recordings
+autodrive_simulator/
+*.zip
+*.mp4
+*.mkv
+
+# experiment outputs (summaries are copied into experiments/ when worth keeping)
+runs/
+
+__pycache__/
+*.pyc
+.pytest_cache/
+.vscode/

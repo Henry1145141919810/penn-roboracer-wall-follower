@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    container: ros:humble
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install test tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends python3-numpy python3-pytest python3-flake8
+
+      - name: Lint (new code only; upstream AutoDRIVE files are left untouched)
+        run: |
+          python3 -m flake8 --max-line-length 99 \
+            autodrive_devkit/autodrive_roboracer/wall_follow_node.py \
+            autodrive_devkit/test/test_wall_follow.py tools tests
+
+      - name: colcon build
+        run: |
+          source /opt/ros/humble/setup.bash
+          mkdir -p /tmp/ws/src && cp -r autodrive_devkit /tmp/ws/src/
+          cd /tmp/ws && colcon build
+          source install/setup.bash
+          ros2 pkg executables autodrive_roboracer | grep wall_follow_node
+
+      - name: Unit tests and offline closed-loop tests
+        run: |
+          source /opt/ros/humble/setup.bash
+          python3 -m pytest -v autodrive_devkit/test/test_wall_follow.py tests

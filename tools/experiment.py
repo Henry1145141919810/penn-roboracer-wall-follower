@@ -267,6 +267,7 @@ def main():
     ap.add_argument('--label', required=True)
     ap.add_argument('--laps', type=int, default=3)
     ap.add_argument('--repeat', type=int, default=1)
+    ap.add_argument('--start-index', type=int, default=0, help='first run number (trace names)')
     ap.add_argument('--timeout', type=float, default=180.0)
     ap.add_argument('--seconds', type=float, default=0.0, help='stop after this long')
     ap.add_argument('--raw-throttle', type=float, default=None,
@@ -292,7 +293,7 @@ def main():
     node = Runner()
     node.external = args.external
     try:
-        for i in range(args.repeat):
+        for i in range(args.start_index, args.start_index + args.repeat):
             run_once(node, args, params, i)
         if not args.external:
             node.reset_car()

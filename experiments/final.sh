@@ -1,5 +1,5 @@
 #!/bin/bash
-# Evaluation of the hand-tuned configuration (recorded at commit 6bf3960, before traction
+# Evaluation of the hand-tuned configuration (recorded at commit ac6a767, before traction
 # control and CMA-ES tuning): baselines, config F and one-component-removed ablations.
 # Z03-Z10 used the defaults of that time; with today's defaults they measure the tuned config.
 # 3 runs x 4 laps per variant (lap 1 dropped -> 9 flying laps), repeats interleaved

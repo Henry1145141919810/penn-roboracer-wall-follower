@@ -3,9 +3,10 @@
 
 Kinematic bicycle car + ray-cast 270 deg LiDAR on a track made of two wall
 polylines. Three things are matched to measurements from the AutoDRIVE
-simulator: speed = 25 m/s x throttle with a fast lag, a grip limit of about
-7 m/s^2 lateral acceleration (asking for more makes the car slide wide), and
-a 40 Hz LiDAR read by a ~160 Hz control loop. It is still NOT a replacement
+simulator: speed = 25 m/s x throttle with a fast lag (acceleration up to
+6 m/s^2, braking up to 7.5 m/s^2), a grip limit of about 7 m/s^2 lateral
+acceleration (asking for more makes the car slide wide), and a 40 Hz LiDAR
+read by a ~160 Hz control loop. It is still NOT a replacement
 for the real simulator, and lap times here are only indicative. It answers one
 question cheaply: does the controller still get round without touching a wall?
 
@@ -39,6 +40,8 @@ A_GRIP = 7.0  # m/s^2, measured: 6-7 m/s^2 max in the real simulator
 ANGLE_MIN, ANGLE_INC, N_BEAMS, RANGE_MAX = -2.35619, 0.004363323, 1080, 10.0
 V_FULL_THROTTLE = 25.0
 SPEED_TAU = 0.1  # s, speed response (measured: ~0.2 s to 90 %)
+ACCEL_MAX = 6.0  # m/s^2, measured max acceleration
+DECEL_MAX = 7.5  # m/s^2, measured max braking (even with negative throttle)
 STEER_TAU = 0.05  # s, steering servo
 
 
@@ -155,7 +158,8 @@ def simulate(params, laps=3, mirror=False, scan_rate=40.0, control_rate=160.0, n
         throttle, steer, _ = ctrl.step(r, ANGLE_MIN, ANGLE_INC, RANGE_MAX, t, v)
         queue.append((throttle, steer))
         throttle, steer = queue.pop(0)
-        v += (V_FULL_THROTTLE * throttle - v) * dt / SPEED_TAU
+        dv = (V_FULL_THROTTLE * throttle - v) / SPEED_TAU
+        v += float(np.clip(dv, -DECEL_MAX, ACCEL_MAX)) * dt
         delta += (steer * MAX_STEER_RAD - delta) * dt / STEER_TAU
         curvature = math.tan(delta) / WHEELBASE
         if v * v * abs(curvature) > A_GRIP:  # beyond grip: the car slides wide

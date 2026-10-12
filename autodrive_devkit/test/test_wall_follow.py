@@ -14,7 +14,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from autodrive_roboracer.wall_follow_node import (  # noqa: E402
     MAX_STEER_RAD, Params, WallFollowController, arc_clearance, beam_index, cast_param,
-    clean_ranges, forward_clearance, validate, wall_estimate)
+    clean_ranges, deepest_direction, forward_clearance, validate, wall_estimate)
 
 ANGLE_MIN = -2.35619
 ANGLE_INC = 0.004363323
@@ -105,7 +105,7 @@ def test_single_wall_modes_hold_wall_distance():
 
 
 def test_missing_wall_falls_back_to_remembered_width():
-    c = WallFollowController()
+    c = WallFollowController(Params(preview_gain=0.0))  # test the fallback alone
     run(c, corridor_scan(0.8, 0.8), steps=20)  # learn the track width (1.6 m)
     _, steer, _ = run(c, corridor_scan(50.0, 0.8), steps=3)  # left wall gone
     assert abs(steer) < 0.05
@@ -267,3 +267,18 @@ def test_right_side_guard_pushes_left():
 def test_validate_rejects_bad_params(bad):
     with pytest.raises(ValueError):
         validate(Params(**bad))
+
+
+@pytest.mark.parametrize('turn', [+1, -1])
+def test_deepest_direction_points_into_the_bend(turn):
+    scan = circle_scan(1.0, 2.0, turn)
+    assert turn * deepest_direction(scan, ANGLES, 60.0) > 0.1
+    assert abs(deepest_direction(corridor_scan(0.8, 0.8), ANGLES, 60.0)) < 0.02
+
+
+@pytest.mark.parametrize('turn', [+1, -1])
+def test_preview_steers_earlier_into_the_bend(turn):
+    scan = circle_scan(1.0, 2.0, turn)
+    _, steer_off, _ = run(WallFollowController(Params(preview_gain=0.0)), scan)
+    _, steer_on, _ = run(WallFollowController(Params(preview_gain=0.4)), scan)
+    assert turn * (steer_on - steer_off) > 0.05

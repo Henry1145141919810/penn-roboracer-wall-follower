@@ -24,8 +24,8 @@ def test_default_controller_completes_three_laps(mirror):
 
 
 @pytest.mark.parametrize('control_rate,noise,latency',
-                         [(40.0, 0.0, 0), (160.0, 0.02, 0), (160.0, 0.0, 6)],
-                         ids=['control_40Hz', 'noise_2cm', 'latency_38ms'])
+                         [(40.0, 0.0, 0), (160.0, 0.02, 0), (160.0, 0.0, 12)],
+                         ids=['control_40Hz', 'noise_2cm', 'latency_75ms'])
 def test_default_controller_is_robust(control_rate, noise, latency):
     result = simulate(Params(), laps=1, control_rate=control_rate, noise=noise,
                       latency=latency)

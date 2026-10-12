@@ -69,6 +69,7 @@ class Runner(Node):
         self.create_subscription(Float32, NS + 'last_lap_time', self.on_last, qos)
         self.create_subscription(Float32, NS + 'lap_time', self.on_laptime, qos)
         self.controller = None
+        self.external = False
         self.raw_throttle = None
         self.active = False
         self.speed = 0.0
@@ -107,6 +108,14 @@ class Runner(Node):
 
     def on_scan(self, msg):
         if not self.active:
+            return
+        if self.external:  # the real wall_follow_node drives; only log
+            self.scans += 1
+            if self.trace is not None:
+                x, y, yaw = self.pose
+                self.trace.write(f'{time.time():.4f},{self.lap_time:.3f},{self.lap_count},'
+                                 f'{self.collisions},{x:.3f},{y:.3f},{yaw:.4f},'
+                                 f'{self.speed:.3f},,,,,,,\n')
             return
         self.scans += 1
         if msg.ranges != self.prev_ranges:
@@ -156,7 +165,8 @@ class Runner(Node):
             self.spin_for(0.1)
         for attempt in range(3):
             for _ in range(5):
-                self.send(0.0, 0.0)
+                if not self.external:
+                    self.send(0.0, 0.0)
                 self.pub_reset.publish(Bool(data=True))
                 self.spin_for(0.05)
             for _ in range(5):
@@ -164,6 +174,8 @@ class Runner(Node):
                 self.spin_for(0.05)
             self.spin_for(1.0)
             x, y, _ = self.pose
+            if self.external:  # the node starts driving again straight away
+                return
             if math.hypot(x - START_XY[0], y - START_XY[1]) < 0.3 and abs(self.speed) < 0.05:
                 return
         raise RuntimeError(f'reset failed: car at ({x:.2f}, {y:.2f})')
@@ -218,7 +230,8 @@ def run_once(node, args, params, index):
             slow_since = None
     wall = time.time() - start
     node.active = False
-    node.send(0.0, 0.0)
+    if not node.external:
+        node.send(0.0, 0.0)
     node.spin_for(0.2)
     if node.collisions > coll0:  # contact in the last moments still counts
         status = 'collision'
@@ -238,7 +251,7 @@ def run_once(node, args, params, index):
         'scan_hz': round(node.scans / wall, 1), 'new_scan_hz': round(node.new_scans / wall, 1),
         'max_speed': round(max_speed, 2),
         'mean_speed': round(speed_sum / max(speed_n, 1), 2),
-        'raw_throttle': args.raw_throttle, 'params': asdict(params),
+        'raw_throttle': args.raw_throttle, 'external': args.external, 'params': asdict(params),
         'trace': os.path.basename(trace_path), 'time': time.strftime('%Y-%m-%d %H:%M:%S'),
         **code_version(),
     }
@@ -259,6 +272,8 @@ def main():
     ap.add_argument('--raw-throttle', type=float, default=None,
                     help='fixed throttle; steering still from the controller')
     ap.add_argument('--no-steer', action='store_true', help='with --raw-throttle: steer 0')
+    ap.add_argument('--external', action='store_true',
+                    help='do not drive: time laps while wall_follow_node drives')
     ap.add_argument('--save-scans', type=int, default=0, help='save every Nth scan + pose')
     ap.add_argument('-p', '--param', action='append', default=[], help='name=value')
     ap.add_argument('--out-dir', default=os.path.join(os.path.dirname(__file__), '..', 'runs'))
@@ -275,12 +290,15 @@ def main():
 
     rclpy.init()
     node = Runner()
+    node.external = args.external
     try:
         for i in range(args.repeat):
             run_once(node, args, params, i)
-        node.reset_car()
+        if not args.external:
+            node.reset_car()
     finally:
-        node.send(0.0, 0.0)
+        if not args.external:
+            node.send(0.0, 0.0)
         node.destroy_node()
         rclpy.try_shutdown()
 

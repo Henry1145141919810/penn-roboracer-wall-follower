@@ -15,6 +15,9 @@ One LaserScan in, one throttle and one steering command out:
    F1TENTH schedule (slower as the steering angle grows); ``'const'`` is one
    fixed speed.
 5. A side guard pushes away from any wall closer than ``side_clearance``.
+6. Corner preview: the mean direction of the farthest returns shows where the
+   track turns; ``preview_gain`` adds it to the error so the car turns in a
+   little earlier and takes a wider, faster arc.
 
 The LiDAR produces ~40 new scans/s but the bridge republishes each one 3-5
 times (~160 messages/s). Steering is only recomputed on a new scan, so the
@@ -61,29 +64,31 @@ class Params:
     lookahead_per_speed: float = 0.15  # ... plus this many metres per m/s of speed
     kp: float = 0.9  # rad of steering per m of error
     ki: float = 0.0
-    kd: float = 0.06
+    kd: float = 0.03
     d_filter_tau: float = 0.05  # s, low-pass on the error derivative
     max_wall_angle: float = 45.0  # deg, clamp on the fitted wall angle (rejects bad fits)
     max_error: float = 0.8  # m, clamp on the lateral error (track is ~1.5 m wide)
     steer_tau: float = 0.0  # s, low-pass on the steering command (0 = off)
+    preview_gain: float = 0.3  # m of error per rad towards the deepest free direction
+    preview_fov: float = 60.0  # deg, half-width of the sector searched for that direction
     use_side_guard: bool = True
     side_clearance: float = 0.35  # m, push away from walls closer than this
     side_gain: float = 2.0  # rad per m of intrusion
     # Speed (m/s targets, turned into throttle below)
     speed_mode: str = 'adaptive'  # 'adaptive', 'steps' or 'const'
-    v_max: float = 5.0  # m/s on open straights
+    v_max: float = 7.0  # m/s on open straights
     v_min: float = 1.0  # m/s floor so the car never stalls
     v_const: float = 1.5  # m/s in 'const' mode
     step_speeds: str = '1.5,1.0,0.5'  # m/s for |steer| < 10 deg, < 20 deg, above
     brake_decel: float = 4.0  # m/s^2 assumed braking for the clearance limit
-    lat_accel: float = 6.0  # m/s^2 allowed lateral acceleration in turns
+    lat_accel: float = 6.5  # m/s^2 allowed lateral acceleration (measured grip ~6-7)
     stop_margin: float = 0.5  # m kept in front when braking to a stop
     car_half_width: float = 0.25  # m, corridor half width for the clearance check
     clearance_mode: str = 'arc'  # 'arc' (along the steering arc) or 'straight'
     # Throttle mapping: throttle = v_target / v_full_throttle + speed_kp * error.
     # Measured in the simulator: steady speed = 25 m/s * throttle, reached in < 0.5 s.
     v_full_throttle: float = 25.0  # m/s the car reaches at throttle 1.0
-    speed_kp: float = 0.0  # throttle per m/s of speed error (needs odometry)
+    speed_kp: float = 0.2  # throttle per m/s of speed error (needs odometry)
     max_throttle: float = 1.0
     min_throttle: float = -1.0
 
@@ -180,6 +185,18 @@ def arc_clearance(ranges, angles, half_width, curvature, max_angle=math.pi / 2):
     if not np.any(blocked):
         return abs(radius) * max_angle
     return float(abs(radius) * np.min(swept[blocked]))
+
+
+def deepest_direction(ranges, angles, fov_deg):
+    """Mean angle of the farthest returns within +-fov: where the track opens up.
+
+    Beams within 90 % of the maximum range (after a 5-beam moving average) are
+    averaged, so a single long beam through a gap does not dominate.
+    """
+    sector = np.abs(angles) < math.radians(fov_deg)
+    r = np.convolve(ranges, np.ones(5) / 5.0, mode='same')[sector]
+    far = r >= 0.9 * np.max(r)
+    return float(np.mean(angles[sector][far]))
 
 
 def side_minimum(ranges, angles, side, lo_deg=20.0, hi_deg=160.0):
@@ -302,6 +319,8 @@ class WallFollowController:
         lookahead = p.lookahead + p.lookahead_per_speed * max(v_now, 0.0)
         error, branch = self.lateral_error(r, angle_min, angle_increment, range_max,
                                            lookahead, dt)
+        if p.preview_gain > 0.0:  # steer early towards where the track turns
+            error += p.preview_gain * deepest_direction(r, angles, p.preview_fov)
         error = float(np.clip(error, -p.max_error, p.max_error))
         if self.prev_error is None or branch != self.prev_branch:
             self.d_filtered = 0.0  # no derivative across a change of reference wall

@@ -2,8 +2,11 @@
 """Small offline simulator for regression tests (no Unity, no ROS needed).
 
 Kinematic bicycle car + ray-cast 270 deg LiDAR on a track made of two wall
-polylines. It is NOT a replacement for the AutoDRIVE simulator (no tyre slip,
-simplified actuators), so lap times here are optimistic. It answers one
+polylines. Three things are matched to measurements from the AutoDRIVE
+simulator: speed = 25 m/s x throttle with a fast lag, a grip limit of about
+7 m/s^2 lateral acceleration (asking for more makes the car slide wide), and
+a 40 Hz LiDAR read by a ~160 Hz control loop. It is still NOT a replacement
+for the real simulator, and lap times here are only indicative. It answers one
 question cheaply: does the controller still get round without touching a wall?
 
     python3 tools/sim2d.py --laps 3                     # replica of the practice track
@@ -29,7 +32,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'autodrive_devk
 TRACK_FILE = os.path.join(os.path.dirname(__file__), '..', 'tests', 'data', 'practice_track.json')
 WHEELBASE = 0.33
 LIDAR_X = 0.2733
-CAR_RADIUS = 0.17  # m, footprint circle centred between the axles
+# Car footprint (rear-axle frame): bumpers at -0.09 / +0.43 m, half width 0.15 m.
+FOOTPRINT = np.array([[x, y] for x in (-0.09, 0.17, 0.43) for y in (-0.15, 0.0, 0.15)
+                      if (x, y) != (0.17, 0.0)])
+A_GRIP = 7.0  # m/s^2, measured: 6-7 m/s^2 max in the real simulator
 ANGLE_MIN, ANGLE_INC, N_BEAMS, RANGE_MAX = -2.35619, 0.004363323, 1080, 10.0
 V_FULL_THROTTLE = 25.0
 SPEED_TAU = 0.1  # s, speed response (measured: ~0.2 s to 90 %)
@@ -114,42 +120,56 @@ class Track:
             r = r + rng.normal(0.0, noise, r.shape)
         return np.minimum(r, RANGE_MAX)
 
-    def clearance(self, x, y):
-        """Distance from the point to the nearest wall segment."""
-        px, py = x - self.seg_a[:, 0], y - self.seg_a[:, 1]
+    def clearance(self, points):
+        """Smallest distance from any of the points (N x 2) to a wall segment."""
+        px = points[:, 0:1] - self.seg_a[:, 0]
+        py = points[:, 1:2] - self.seg_a[:, 1]
         dd = np.sum(self.seg_d ** 2, axis=1)
         u = np.clip((px * self.seg_d[:, 0] + py * self.seg_d[:, 1]) / dd, 0, 1)
         return float(np.min(np.hypot(px - u * self.seg_d[:, 0], py - u * self.seg_d[:, 1])))
 
 
-def simulate(params, laps=3, mirror=False, rate=50.0, noise=0.0, latency=0, seed=0,
-             max_time=120.0, track_file=TRACK_FILE):
-    """Drive ``laps`` laps. Returns dict with status, lap times and min clearance."""
+def simulate(params, laps=3, mirror=False, scan_rate=40.0, control_rate=160.0, noise=0.0,
+             latency=0, seed=0, max_time=120.0, track_file=TRACK_FILE):
+    """Drive ``laps`` laps. Returns dict with status, lap times and min clearance.
+
+    A new scan is taken at ``scan_rate``; the controller is called at
+    ``control_rate`` and sees the latest scan again in between, like the real
+    bridge. ``latency`` delays commands by that many control steps.
+    """
     from autodrive_roboracer.wall_follow_node import WallFollowController, MAX_STEER_RAD
     track = Track(track_file, mirror)
     ctrl = WallFollowController(params)
     rng = np.random.default_rng(seed)
     x, y, yaw = track.start
     v, delta = 0.0, 0.0
-    dt = 1.0 / rate
+    dt = 1.0 / control_rate
+    next_scan, r = 0.0, None
     queue = [(0.0, 0.0)] * latency  # command delay in control steps
     s_prev = track.progress(x, y)
     travelled, lap_start, laps_done, min_clear, t = 0.0, 0.0, [], float('inf'), 0.0
     while t < max_time:
-        r = track.scan(x, y, yaw, noise, rng)
+        if t >= next_scan:
+            r = track.scan(x, y, yaw, noise, rng)
+            next_scan += 1.0 / scan_rate
         throttle, steer, _ = ctrl.step(r, ANGLE_MIN, ANGLE_INC, RANGE_MAX, t, v)
         queue.append((throttle, steer))
         throttle, steer = queue.pop(0)
         v += (V_FULL_THROTTLE * throttle - v) * dt / SPEED_TAU
         delta += (steer * MAX_STEER_RAD - delta) * dt / STEER_TAU
+        curvature = math.tan(delta) / WHEELBASE
+        if v * v * abs(curvature) > A_GRIP:  # beyond grip: the car slides wide
+            curvature = math.copysign(A_GRIP / (v * v), curvature)
         x += v * math.cos(yaw) * dt
         y += v * math.sin(yaw) * dt
-        yaw += v / WHEELBASE * math.tan(delta) * dt
+        yaw += v * curvature * dt
         t += dt
-        cx, cy = x + WHEELBASE / 2 * math.cos(yaw), y + WHEELBASE / 2 * math.sin(yaw)
-        clear = track.clearance(cx, cy)
+        c, s_ = math.cos(yaw), math.sin(yaw)
+        body = np.stack([x + c * FOOTPRINT[:, 0] - s_ * FOOTPRINT[:, 1],
+                         y + s_ * FOOTPRINT[:, 0] + c * FOOTPRINT[:, 1]], axis=1)
+        clear = track.clearance(body)
         min_clear = min(min_clear, clear)
-        if clear < CAR_RADIUS:
+        if clear < 0.01:
             return {'status': 'collision', 'laps': laps_done, 'time': round(t, 2),
                     'min_clearance': round(min_clear, 3)}
         s = track.progress(x, y)
@@ -175,7 +195,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--laps', type=int, default=3)
     ap.add_argument('--mirror', action='store_true', help='counter-clockwise track')
-    ap.add_argument('--rate', type=float, default=50.0, help='scan / control rate in Hz')
+    ap.add_argument('--scan-rate', type=float, default=40.0, help='new LiDAR scans per s')
+    ap.add_argument('--control-rate', type=float, default=160.0, help='controller calls per s')
     ap.add_argument('--noise', type=float, default=0.0, help='LiDAR noise std in m')
     ap.add_argument('--latency', type=int, default=0, help='command delay in steps')
     ap.add_argument('--build-track', metavar='TRACE_CSV')
@@ -189,7 +210,8 @@ def main():
     for item in args.param:
         key, value = item.split('=', 1)
         setattr(params, key, cast_param(by_name[key], value))
-    print(simulate(params, args.laps, args.mirror, args.rate, args.noise, args.latency))
+    print(simulate(params, args.laps, args.mirror, args.scan_rate, args.control_rate,
+                   args.noise, args.latency))
 
 
 if __name__ == '__main__':

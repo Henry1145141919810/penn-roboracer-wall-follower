@@ -13,8 +13,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from autodrive_roboracer.wall_follow_node import (  # noqa: E402
-    MAX_STEER_RAD, Params, WallFollowController, beam_index, cast_param, clean_ranges,
-    forward_clearance, wall_estimate)
+    MAX_STEER_RAD, Params, WallFollowController, arc_clearance, beam_index, cast_param,
+    clean_ranges, forward_clearance, validate, wall_estimate)
 
 ANGLE_MIN = -2.35619
 ANGLE_INC = 0.004363323
@@ -129,6 +129,43 @@ def test_forward_clearance_uses_car_corridor():
         RANGE_MAX, abs=0.1)
 
 
+def circle_scan(radius_in, radius_out, turn):
+    """Scan from the middle of a circular corridor (ring), car tangent to it.
+
+    ``turn`` = +1 for a left-hand bend, -1 for a right-hand bend.
+    """
+    rc = (radius_in + radius_out) / 2.0  # car sits on the middle circle
+    cy = turn * rc  # centre of the ring in the car frame
+    dy = np.sin(ANGLES)
+    r = np.full(N_BEAMS, RANGE_MAX)
+    for rad in (radius_in, radius_out):
+        # |t*d - (0, cy)| = rad  ->  t^2 - 2 t dy cy + cy^2 - rad^2 = 0
+        b = -2 * dy * cy
+        c = cy ** 2 - rad ** 2
+        disc = b ** 2 - 4 * c
+        with np.errstate(invalid='ignore'):
+            for t in ((-b - np.sqrt(disc)) / 2, (-b + np.sqrt(disc)) / 2):
+                ok = (disc >= 0) & (t > 1e-6)
+                r = np.where(ok & (t < r), t, r)
+    return r
+
+
+@pytest.mark.parametrize('turn', [+1, -1])
+def test_arc_clearance_sees_through_a_bend(turn):
+    scan = circle_scan(1.0, 2.0, turn)
+    straight = forward_clearance(scan, ANGLES, 0.25)
+    on_arc = arc_clearance(scan, ANGLES, 0.25, turn / 1.5)  # following the bend
+    wrong_way = arc_clearance(scan, ANGLES, 0.25, -turn / 1.5)
+    assert straight < 1.5  # the outer wall is close straight ahead
+    assert on_arc == pytest.approx(1.5 * math.pi / 2, abs=0.05)  # whole checked arc free
+    assert wrong_way < straight
+
+
+def test_arc_clearance_matches_straight_for_zero_curvature():
+    scan = corridor_scan(0.8, 0.8, front=3.0)
+    assert arc_clearance(scan, ANGLES, 0.25, 0.0) == forward_clearance(scan, ANGLES, 0.25)
+
+
 def test_adaptive_speed_brakes_for_wall_ahead():
     open_road, _, info_open = run(WallFollowController(), corridor_scan(0.8, 0.8))
     near_wall, _, info_near = run(WallFollowController(), corridor_scan(0.8, 0.8, front=1.5))
@@ -177,3 +214,56 @@ def test_cast_param_accepts_ros_types():
     assert isinstance(cast_param(by_name['v_max'], 6), float)
     assert cast_param(by_name['use_side_guard'], 'false') is False
     assert cast_param(by_name['mode'], 'left') == 'left'
+
+
+def test_republished_scan_keeps_steering_and_refreshes_throttle():
+    p = Params(speed_kp=0.2)
+    c = WallFollowController(p)
+    scan = corridor_scan(0.5, 1.1)
+    thr1, steer1, _ = c.step(scan, ANGLE_MIN, ANGLE_INC, RANGE_MAX, 0.000, speed=2.0)
+    state = (c.prev_error, c.d_filtered, c.prev_time)
+    thr2, steer2, _ = c.step(scan.copy(), ANGLE_MIN, ANGLE_INC, RANGE_MAX, 0.006, speed=3.0)
+    assert steer2 == steer1  # same scan -> same steering, no filter update
+    assert (c.prev_error, c.d_filtered, c.prev_time) == state
+    assert thr2 == pytest.approx(thr1 - 0.2 * 1.0)  # throttle uses the new speed
+
+
+def test_derivative_reacts_to_error_rate():
+    # Car drifting towards the left wall: D adds steering to the right.
+    def drift(kd):
+        c = WallFollowController(Params(kd=kd, use_side_guard=False))
+        out = None
+        for i, left in enumerate(np.linspace(0.9, 0.7, 6)):
+            out = c.step(corridor_scan(left, 1.6 - left), ANGLE_MIN, ANGLE_INC, RANGE_MAX,
+                         0.025 * i)
+        return out[1]
+    assert drift(0.1) < drift(0.0) < 0.0
+
+
+def test_long_gap_restarts_derivative():
+    c = WallFollowController(Params(kd=0.1))
+    c.step(corridor_scan(0.8, 0.8), ANGLE_MIN, ANGLE_INC, RANGE_MAX, 0.0)
+    c.step(corridor_scan(0.4, 1.2), ANGLE_MIN, ANGLE_INC, RANGE_MAX, 5.0)  # 5 s later
+    assert c.d_filtered == 0.0
+
+
+def test_error_is_clamped():
+    c = WallFollowController(Params(max_error=0.5))
+    _, _, info = run(c, corridor_scan(3.0, 0.3))
+    assert info['error'] == pytest.approx(0.5)
+
+
+def test_right_side_guard_pushes_left():
+    p_on = Params(mode='right', wall_distance=0.25)
+    p_off = Params(mode='right', wall_distance=0.25, use_side_guard=False)
+    scan = corridor_scan(1.4, 0.2)
+    _, steer_on, _ = run(WallFollowController(p_on), scan)
+    _, steer_off, _ = run(WallFollowController(p_off), scan)
+    assert steer_on > steer_off
+
+
+@pytest.mark.parametrize('bad', [{'mode': 'middle'}, {'speed_mode': 'fast'},
+                                 {'step_speeds': '2'}, {'v_full_throttle': 0.0}])
+def test_validate_rejects_bad_params(bad):
+    with pytest.raises(ValueError):
+        validate(Params(**bad))

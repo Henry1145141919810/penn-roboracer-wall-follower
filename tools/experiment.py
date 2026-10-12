@@ -14,6 +14,7 @@ One JSON line per run goes to ``runs/results.jsonl``; a per-scan trace goes to
 
 import argparse
 from dataclasses import asdict, fields
+import hashlib
 import json
 import math
 import os
@@ -29,20 +30,29 @@ from std_msgs.msg import Bool, Float32, Int32
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'autodrive_devkit'))
 from autodrive_roboracer.wall_follow_node import (  # noqa: E402
-    Params, WallFollowController, THROTTLE_TOPIC, STEERING_TOPIC, LIDAR_TOPIC, ODOM_TOPIC)
+    Params, WallFollowController, cast_param, validate,
+    THROTTLE_TOPIC, STEERING_TOPIC, LIDAR_TOPIC, ODOM_TOPIC)
 
 NS = '/autodrive/roboracer_1/'
+REPO = os.path.join(os.path.dirname(__file__), '..')
+NODE_FILE = os.path.join(REPO, 'autodrive_devkit', 'autodrive_roboracer', 'wall_follow_node.py')
+START_XY = (0.80, 3.16)  # where Reset puts the car on the practice track
 
 
-def parse_value(text):
-    for cast in (int, float):
-        try:
-            return cast(text)
-        except ValueError:
-            pass
-    if text.lower() in ('true', 'false'):
-        return text.lower() == 'true'
-    return text
+def code_version():
+    """Commit and controller-file hash, so every result can be traced to code."""
+    head = ''
+    try:
+        ref = open(os.path.join(REPO, '.git', 'HEAD')).read().strip()
+        if ref.startswith('ref: '):
+            head = open(os.path.join(REPO, '.git', ref[5:])).read().strip()
+        else:
+            head = ref
+    except OSError:
+        pass
+    with open(NODE_FILE, 'rb') as f:
+        node_sha = hashlib.sha256(f.read()).hexdigest()[:12]
+    return {'git_head': head[:12], 'node_sha256': node_sha}
 
 
 class Runner(Node):
@@ -69,11 +79,15 @@ class Runner(Node):
         self.lap_time = 0.0
         self.trace = None
         self.scans = 0
+        self.new_scans = 0
+        self.prev_ranges = None
+        self.odom_seen = False
         self.save_every = 0
         self.saved = []
 
     # --- sensor callbacks -------------------------------------------------
     def on_odom(self, msg):
+        self.odom_seen = True
         self.speed = msg.twist.twist.linear.x
         q = msg.pose.pose.orientation
         yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
@@ -95,6 +109,9 @@ class Runner(Node):
         if not self.active:
             return
         self.scans += 1
+        if msg.ranges != self.prev_ranges:
+            self.new_scans += 1
+            self.prev_ranges = msg.ranges
         stamp = msg.header.stamp.sec + 1e-9 * msg.header.stamp.nanosec
         if self.raw_throttle is not None:
             throttle, steer, info = self.raw_throttle, 0.0, {}
@@ -129,15 +146,27 @@ class Runner(Node):
             rclpy.spin_once(self, timeout_sec=0.01)
 
     def reset_car(self):
+        """Stop the car, reset it and check that it is back at the start."""
         self.active = False
-        for _ in range(5):
-            self.send(0.0, 0.0)
-            self.pub_reset.publish(Bool(data=True))
-            self.spin_for(0.05)
-        for _ in range(5):
-            self.pub_reset.publish(Bool(data=False))
-            self.spin_for(0.05)
-        self.spin_for(1.0)
+        # Wait until the bridge is discovered, so the reset messages are not lost.
+        deadline = time.time() + 10.0
+        while (self.pub_reset.get_subscription_count() == 0 or not self.odom_seen):
+            if time.time() > deadline:
+                raise RuntimeError('bridge not found: is it running and the sim connected?')
+            self.spin_for(0.1)
+        for attempt in range(3):
+            for _ in range(5):
+                self.send(0.0, 0.0)
+                self.pub_reset.publish(Bool(data=True))
+                self.spin_for(0.05)
+            for _ in range(5):
+                self.pub_reset.publish(Bool(data=False))
+                self.spin_for(0.05)
+            self.spin_for(1.0)
+            x, y, _ = self.pose
+            if math.hypot(x - START_XY[0], y - START_XY[1]) < 0.3 and abs(self.speed) < 0.05:
+                return
+        raise RuntimeError(f'reset failed: car at ({x:.2f}, {y:.2f})')
 
 
 def run_once(node, args, params, index):
@@ -157,6 +186,7 @@ def run_once(node, args, params, index):
     seen_lap, start, slow_since, max_speed = lap0, time.time(), None, 0.0
     speed_sum, speed_n = 0.0, 0
     node.scans = 0
+    node.new_scans = 0
     node.save_every = args.save_scans
     node.saved = []
     node.active = True
@@ -189,6 +219,9 @@ def run_once(node, args, params, index):
     wall = time.time() - start
     node.active = False
     node.send(0.0, 0.0)
+    node.spin_for(0.2)
+    if node.collisions > coll0:  # contact in the last moments still counts
+        status = 'collision'
     node.trace.close()
     node.trace = None
     if node.saved:
@@ -202,14 +235,16 @@ def run_once(node, args, params, index):
         'best': min(laps) if laps else None,
         'mean': round(sum(laps) / len(laps), 3) if laps else None,
         'collisions': node.collisions - coll0, 'wall_s': round(wall, 2),
-        'scan_hz': round(node.scans / wall, 1), 'max_speed': round(max_speed, 2),
+        'scan_hz': round(node.scans / wall, 1), 'new_scan_hz': round(node.new_scans / wall, 1),
+        'max_speed': round(max_speed, 2),
         'mean_speed': round(speed_sum / max(speed_n, 1), 2),
         'raw_throttle': args.raw_throttle, 'params': asdict(params),
         'trace': os.path.basename(trace_path), 'time': time.strftime('%Y-%m-%d %H:%M:%S'),
+        **code_version(),
     }
     with open(os.path.join(args.out_dir, 'results.jsonl'), 'a') as f:
         f.write(json.dumps(result) + '\n')
-    keys = ('label', 'run', 'status', 'laps', 'best', 'collisions', 'max_speed', 'scan_hz')
+    keys = ('label', 'run', 'status', 'laps', 'best', 'collisions', 'max_speed', 'new_scan_hz')
     print(json.dumps({k: result[k] for k in keys}), flush=True)
     return result
 
@@ -230,12 +265,13 @@ def main():
     args = ap.parse_args()
 
     params = Params()
-    names = {f.name for f in fields(Params)}
+    by_name = {f.name: f for f in fields(Params)}
     for item in args.param:
         key, value = item.split('=', 1)
-        if key not in names:
+        if key not in by_name:
             sys.exit(f'unknown parameter {key}')
-        setattr(params, key, parse_value(value))
+        setattr(params, key, cast_param(by_name[key], value))
+    validate(params)
 
     rclpy.init()
     node = Runner()

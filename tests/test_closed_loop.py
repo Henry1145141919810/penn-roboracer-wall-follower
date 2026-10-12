@@ -23,11 +23,20 @@ def test_default_controller_completes_three_laps(mirror):
     assert len(result['laps']) == 3
 
 
-@pytest.mark.parametrize('rate,noise,latency', [(40.0, 0.0, 0), (50.0, 0.02, 0), (50.0, 0.0, 2)],
-                         ids=['40Hz', 'noise_2cm', 'latency_40ms'])
-def test_default_controller_is_robust(rate, noise, latency):
-    result = simulate(Params(), laps=1, rate=rate, noise=noise, latency=latency)
+@pytest.mark.parametrize('control_rate,noise,latency',
+                         [(40.0, 0.0, 0), (160.0, 0.02, 0), (160.0, 0.0, 6)],
+                         ids=['control_40Hz', 'noise_2cm', 'latency_38ms'])
+def test_default_controller_is_robust(control_rate, noise, latency):
+    result = simulate(Params(), laps=1, control_rate=control_rate, noise=noise,
+                      latency=latency)
     assert result['status'] == 'ok', result
+
+
+def test_simulator_can_fail():
+    # Sanity check of the test bed: constant 4 m/s crashes in the real simulator
+    # (bottom hairpin), so it must crash here too, or these tests prove nothing.
+    p = Params(speed_mode='const', v_const=4.0, lookahead=1.0, lookahead_per_speed=0.0)
+    assert simulate(p, laps=1)['status'] == 'collision'
 
 
 def test_textbook_baseline_completes_a_lap():

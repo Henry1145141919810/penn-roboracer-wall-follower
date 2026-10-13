@@ -21,6 +21,8 @@ ANGLE_MIN = -2.35619
 ANGLE_INC = 0.004363323
 N_BEAMS = 1080
 RANGE_MAX = 10.0
+# The PD steering law with the gains it was tested with (the node default is now 'pursuit').
+PD = dict(steer_mode='pd', kp=0.9, preview_gain=0.0)
 ANGLES = ANGLE_MIN + ANGLE_INC * np.arange(N_BEAMS)
 
 
@@ -95,18 +97,18 @@ def test_heading_error_is_corrected(yaw, sign):
 
 
 def test_single_wall_modes_hold_wall_distance():
-    p = Params(mode='right', wall_distance=0.6, use_side_guard=False)
+    p = Params(mode='right', wall_distance=0.6, use_side_guard=False, **PD)
     _, steer, _ = run(WallFollowController(p), corridor_scan(1.0, 0.6))
     assert abs(steer) < 0.02
     _, steer, _ = run(WallFollowController(p), corridor_scan(1.2, 0.4))
     assert steer > 0.1  # too close to the right wall -> steer left
-    p = Params(mode='left', wall_distance=0.6, use_side_guard=False)
+    p = Params(mode='left', wall_distance=0.6, use_side_guard=False, **PD)
     _, steer, _ = run(WallFollowController(p), corridor_scan(0.4, 1.2))
     assert steer < -0.1  # too close to the left wall -> steer right
 
 
 def test_missing_wall_falls_back_to_remembered_width():
-    c = WallFollowController(Params(preview_gain=0.0))  # test the fallback alone
+    c = WallFollowController(Params(**PD))  # test the fallback alone
     run(c, corridor_scan(0.8, 0.8), steps=20)  # learn the track width (1.6 m)
     _, steer, _ = run(c, corridor_scan(50.0, 0.8), steps=3)  # left wall gone
     assert abs(steer) < 0.05
@@ -176,7 +178,7 @@ def test_adaptive_speed_brakes_for_wall_ahead():
 
 
 def test_steps_mode_is_textbook_schedule():
-    p = Params(speed_mode='steps')
+    p = Params(speed_mode='steps', **PD)
     _, _, info = run(WallFollowController(p), corridor_scan(0.8, 0.8))
     assert info['v_target'] == 1.5
     _, _, info = run(WallFollowController(p), corridor_scan(0.3, 1.3))
@@ -281,8 +283,8 @@ def test_deepest_direction_points_into_the_bend(turn):
 @pytest.mark.parametrize('turn', [+1, -1])
 def test_preview_steers_earlier_into_the_bend(turn):
     scan = circle_scan(1.0, 2.0, turn)
-    _, steer_off, _ = run(WallFollowController(Params(preview_gain=0.0)), scan)
-    _, steer_on, _ = run(WallFollowController(Params(preview_gain=0.4)), scan)
+    _, steer_off, _ = run(WallFollowController(Params(**PD)), scan)
+    _, steer_on, _ = run(WallFollowController(Params(**{**PD, 'preview_gain': 0.4})), scan)
     assert turn * (steer_on - steer_off) > 0.05
 
 

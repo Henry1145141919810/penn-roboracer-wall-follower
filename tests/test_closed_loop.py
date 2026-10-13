@@ -35,7 +35,8 @@ def test_default_controller_is_robust(control_rate, noise, latency):
 def test_simulator_can_fail():
     # Sanity check of the test bed: constant 4 m/s crashes in the real simulator
     # (bottom hairpin), so it must crash here too, or these tests prove nothing.
-    p = Params(speed_mode='const', v_const=4.0, lookahead=1.0, lookahead_per_speed=0.0)
+    p = Params(steer_mode='pd', preview_gain=0.27, speed_mode='const', v_const=4.0,
+               lookahead=1.0, lookahead_per_speed=0.0)
     assert simulate(p, laps=1)['status'] == 'collision'
 
 

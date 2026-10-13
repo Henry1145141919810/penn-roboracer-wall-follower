@@ -5,123 +5,145 @@ simulator) from its LiDAR scan.
 
 | | |
 |---|---|
-| **Fastest clean lap** | **6.299 s** |
-| **Consecutive clean laps** | **31 of 31** in one run of the real node (`ros2 run`, default parameters). Best 6.324 s, slowest flying lap 6.426 s |
+| **Fastest clean lap** | **5.994 s** (default configuration; simulator lap timer) |
+| **Consecutive clean laps** | **31 of 31** in one run of the real node (`ros2 run`, default parameters): best 5.994 s, mean 6.012 ± 0.009 s, slowest flying lap 6.031 s. |
 | **Video** | VIDEO_LINK_HERE (unlisted YouTube, Driver's Eye camera) |
 | **Node** | [`autodrive_devkit/autodrive_roboracer/wall_follow_node.py`](autodrive_devkit/autodrive_roboracer/wall_follow_node.py) |
 
-All times come from the simulator's own lap timer, which is the same clock the HUD shows.
+All lap times are the simulator's own lap timer, the same clock the HUD shows. "Flying laps"
+means lap 2 onward: a reset does not restart the timer, so lap 1 also contains the idle time
+before the car starts.
 
-![Final configuration, laps coloured by speed](docs/final_laps.png)
+![Default configuration, laps coloured by speed](docs/final_laps.png)
 
-*Final configuration on the practice track. Blue is slow, red is fast (7.3 m/s). The car runs
+*Default configuration on the practice track. Blue is slow, red is fast (7.6 m/s). The car runs
 clockwise from the green square. Walls are drawn from logged LiDAR scans.*
+
+## Two configurations
+
+The node ships with one default and two alternative parameter files. They share the wall fits,
+the side guard, the speed logic and the traction control; they differ in what the steering aims
+at.
+
+| Configuration | Steering reference | Mean flying lap (s) | How to run |
+|---|---|---|---|
+| **Default** | Free-space aim point: the centre of the free sector at a lookahead range, on a disparity-extended scan (follow-the-gap style). The two fitted walls provide centring, the side guard and the speed limits. | **6.01** (see below) | `ros2 run autodrive_roboracer wall_follow_node` |
+| Two-wall + corner preview | Midline between the two fitted walls, PD, plus a small bias towards the deepest free direction | 6.44 ± 0.27 (best 6.32) | `--ros-args --params-file .../config/two_wall_preview.yaml` |
+| Pure two-wall | Midline between the two fitted walls, PD, nothing else | 7.33 ± 0.04 | `--ros-args --params-file .../config/two_wall_pure.yaml` |
+
+The challenge asks for a wall follower. The default configuration's primary steering reference
+is the free space ahead, not the walls; the walls are secondary (centring with a small gain, the
+side guard, and all speed limits come from wall and scan distances). If a strict two-wall
+follower is wanted, the second configuration is the one to judge: it is the same node with
+`steer_mode:=pd`, and every number for it is in the tables below.
 
 ## How it works
 
-Each LiDAR scan (1080 beams over 270°) produces one steering command and one throttle command.
+Each LiDAR scan (1080 beams over 270°) produces one steering and one throttle command.
 
-**Steering**
+**Walls.** For each side, beam *b* points 90° to the side and beam *a* 50° further forward.
+For a straight wall, `tan α = (a·cos θ − b) / (a·sin θ)` gives the car's angle to the wall and
+`D = b·cos α` its distance. The centring error is `(D_left − D_right) / 2`, projected a little
+ahead. Wall-angle and error clamps reject bad fits. A side guard adds steering away from any wall
+closer than 0.37 m.
 
-1. **Wall fit.** For each side wall, beam *b* points 90° to the side and beam *a* points 50°
-   further forward. For a straight wall, `tan α = (a·cos θ − b) / (a·sin θ)` gives the car's angle
-   to the wall, and `D = b·cos α` its distance. The distance is projected ahead,
-   `D + L·sin α`, with a look-ahead `L` that grows with speed.
-2. **Centring.** The error is `(D_left − D_right) / 2`, and a PD controller turns it into a
-   steering angle. If one wall disappears, the node follows the other wall at half the remembered
-   track width. Wall-angle and error clamps reject bad fits. A side guard pushes away from any wall
-   closer than 0.37 m.
-3. **Corner preview.** The mean direction of the farthest returns within ±60° shows where the
-   track turns. A small bias towards it (`preview_gain`) makes the car turn in earlier and take a
-   wider, faster arc. This term borrows from follow-the-gap; everything else is wall following.
-   With `preview_gain:=0` the node is a pure two-wall follower, which is also clean but slower
-   (7.33 s, see the ablation).
+**Steering (default).**
+1. *Disparity extension.* Wherever two neighbouring beams differ by more than 0.3 m, the nearer
+   range is copied over the beams the car's half width would sweep at that distance. A direction
+   left free afterwards is one the car fits through.
+2. *Aim point.* Among the beams longer than the lookahead range (1.93 m + 0.20 m per m/s of
+   speed), the contiguous free sector containing the deepest direction is chosen and the car aims
+   at its centre. If nothing is free at that range, the range shrinks (down to 1.17 m). The aim
+   point is shifted 0.24 m towards the inside of the turn (`apex_shift`).
+3. *Pure pursuit.* The steering angle is the arc that reaches the aim point:
+   `κ = 2·sin θ / L`, `δ = atan(κ · wheelbase)`. A small PD term on the wall-centring error
+   (kp 0.084) and the side guard are added.
 
-**Speed**
+**Steering (two-wall configurations).** `δ = kp · error` with kp 0.42, plus the derivative term,
+the optional corner-preview bias (`preview_gain` × the deepest direction) and the side guard.
 
-4. **Target speed** is the lowest of three limits:
-   - the top speed `v_max`;
-   - braking: `√(v_corner² + 2·a_brake·d)`, where `d` is the free distance along the arc the car is
-     steering on. Mid-corner, the straight-ahead distance is short even when the path is clear,
-     so the arc matters;
-   - cornering: `√(a_lat / κ)`, with `κ = tan(δ) / wheelbase`.
-5. **Throttle.** In this simulator, throttle sets wheel speed (measured: steady speed ≈ 25 m/s ×
-   throttle). The throttle is therefore `v_target / 25` plus a speed-error term from odometry.
-   **Traction control** caps the commanded wheel speed at 18 % (+0.5 m/s) above the car's speed. Full throttle
-   from low speed spins the wheels: in the measurement, 5.4 m/s after 1.2 s instead of 7.4 m/s.
+**Speed.** The target speed is the lowest of three limits: the top speed `v_max`; braking
+`√(v_corner² + 2·a_brake·d)` where `d` is the free distance along the arc the car is steering on;
+and cornering `√(a_lat / κ)` from the commanded curvature. Throttle in this simulator sets wheel
+speed (steady speed ≈ 25 m/s × throttle), so `throttle = v_target / 25` plus a speed-error term
+from odometry, capped by traction control (wheel speed at most 16 % + 0.5 m/s above the car's
+speed; full throttle from low speed spins the wheels).
 
-**Plumbing**
+`a_lat` is a cornering *speed target*, tuned slightly above the measured steady-state grip
+(8.34 vs about 8 m/s²): on corner entry the car routinely exceeds it while braking, and the
+protection against walls comes from the arc-clearance braking, not from this limit.
 
-- The LiDAR produces about 40 new scans per second, and the bridge republishes each one 3–5
-  times. Steering is recomputed only on a new scan, so the derivative sees real changes. Throttle
-  is refreshed on every message.
-- When the node stops (Ctrl+C or SIGTERM), it publishes zero throttle and steering. The bridge
-  keeps replaying the last command it received, so without this the car would keep driving.
-- Every tunable is a ROS parameter, and parameters can be changed live
-  (`ros2 param set /wall_follow_node v_max 6.0`).
+**Plumbing.** The LiDAR produces about 40 new scans per second and the bridge republishes each
+one 3–5 times; steering is recomputed only on a new scan, throttle on every message. On Ctrl+C
+or SIGTERM the node publishes zero throttle and steering before it exits (the bridge replays the
+last command forever otherwise). Malformed scans are ignored. Every tunable is a ROS parameter
+and can be changed live.
 
 ## Results
 
 ### From baseline to final
 
-Lap times are flying laps (lap 2 onward). A reset does not restart the simulator's lap timer, so
-lap 1 also contains the idle time before the car starts. Each row is 3 runs × 4 laps (9 flying
-laps), with runs interleaved across variants.
+Each row is 3 runs × 4 laps (9 flying laps), runs interleaved across variants. Mean ± standard
+deviation of the flying laps; laps within a run are correlated, so treat the ± as spread, not as a
+confidence interval.
 
-| Version | Mean flying lap (s) | Best (s) | Wall contacts |
+| Version | Mean flying lap (s) | Best (s) | Clean runs |
 |---|---|---|---|
-| Textbook wall follower, left wall (F1TENTH lab: PD, 1.5/1.0/0.5 m/s by steering angle) | 24.080 ± 0.042 | 24.036 | 0 |
-| Textbook wall follower, right (inner) wall | 21.015 ± 0.084 | 20.897 | 0 |
-| Hand-tuned: centring, arc braking, cornering limit, corner preview, speed feedback | 7.104 ± 0.043 | 7.052 | 0 |
-| **Final: + traction control, parameters tuned with CMA-ES** | **6.374 ± 0.055** | **6.299** | **0** |
+| Textbook wall follower, left wall (F1TENTH lab: PD, 1.5/1.0/0.5 m/s by steering angle) | 24.080 ± 0.042 | 24.036 | 3/3 |
+| Textbook wall follower, right (inner) wall | 21.015 ± 0.084 | 20.897 | 3/3 |
+| Two-wall PD, hand-tuned speed logic (centring, arc braking, cornering limit, preview, speed feedback) | 7.104 ± 0.043 | 7.052 | 3/3 |
+| Two-wall PD + traction control, parameters tuned with CMA-ES | 6.374 ± 0.055 | 6.299 | 3/3 |
+| Free-space aim point (pursuit), first CMA-ES stage | 6.084 ± 0.006 | 6.076 | 3/3 |
+| **Free-space aim point, second CMA-ES stage (default)** | **6.014 ± 0.008** | **6.007** | **3/3** |
+| Default, re-measured with the shipped build | 6.011 ± 0.004 | 6.004 | 3/3 |
+| Default, real node (`ros2 run`), 31 laps in a row | 6.012 ± 0.009 (30 flying laps) | 5.994 | 1/1 |
 
-Every run of the final configuration (4 runs, 43 laps) was clean. Across all 39 flying laps:
-mean 6.367 s, std 0.036 s, best 6.299 s, worst 6.466 s.
+Search scores are not quoted anywhere: every number above is a re-measurement of a fixed
+configuration.
 
-### Ablation: remove one component from the final configuration
+### Ablation: remove one component from the default configuration
 
-| Variant | Mean flying lap (s) | Δ vs final (s) | Clean runs |
+3 runs × 4 laps per variant, interleaved.
+
+| Variant | Mean flying lap (s) | Δ (s) | Clean runs |
 |---|---|---|---|
-| **Final** | **6.374 ± 0.055** | – | 3/3 |
-| − centring (follow the right wall only) | 7.869 ± 0.099 | +1.50 | 3/3 |
-| − arc clearance (straight-ahead corridor) | 7.370 ± 0.009 | +1.00 | 3/3 |
-| − corner preview (pure wall follower) | 7.327 ± 0.039 | +0.95 | 3/3 |
-| − speed feedback | 7.135 ± 0.235 | +0.76 | 3/3 |
-| − traction control | 6.506 ± 0.260 | +0.13 | 3/3 |
-| − speed-dependent look-ahead (fixed 1.0 m) | 6.485 ± 0.280 | +0.11 | 3/3 |
-| − corner-entry speed (`v_corner=0`) | 6.351 ± 0.013 | −0.02 | 3/3 |
-| − side guard | 6.363 ± 0.025 | −0.01 | 3/3 |
-| − adaptive speed (constant 3 m/s) | 10.206 ± 0.001 | +3.83 | 3/3 |
+| **Default** | **6.014 ± 0.008** | – | 3/3 |
+| − speed-dependent lookahead (fixed 1.93 m) | 7.436 ± 0.207 | +1.42 | 3/3 |
+| − speed feedback | 6.752 ± 0.007 | +0.74 | **2/3** |
+| − arc clearance (straight-ahead corridor) | 6.621 ± 0.005 | +0.61 | 3/3 |
+| two-wall PD steering instead of the aim point (same speed envelope) | 6.468 ± 0.320 | +0.45 | 3/3 |
+| − wall-centring term (kp = 0) | 6.151 ± 0.017 | +0.14 | 3/3 |
+| − traction control | 6.101 ± 0.007 | +0.09 | 3/3 |
+| − apex shift | 6.098 ± 0.004 | +0.08 | 3/3 |
+| − disparity extension | 6.071 ± 0.167 | +0.06 | 3/3 |
+| − corner speed (`v_corner = 0`) | 6.050 ± 0.004 | +0.04 | **1/3** |
+| − side guard | 6.025 ± 0.005 | +0.01 | 3/3 |
+| aim-point steering with the earlier (two-wall) speed envelope | 6.088 ± 0.004 | +0.07 | 3/3 |
 
-Centring, arc clearance, the corner preview and speed feedback each carry close to a second.
-Traction control and the speed-dependent look-ahead give smaller gains, and removing them also
-makes laps less consistent (std 0.26–0.28 s). The corner-entry speed and the side guard show no
-measurable effect on lap time. The side guard stays as a safety margin.
+The last two rows separate the steering change from the speed re-tune: the aim point with the
+earlier speed envelope is already at 6.09 s, while two-wall steering with the new envelope stays
+at 6.47 s. The speed-dependent lookahead, the speed feedback and the arc clearance each carry
+more than half a second. The wall-centring term, traction control and the apex shift are worth about a
+tenth each. Two variants that are not slower by much crashed: without the corner-speed term
+(2 wall contacts in 3 runs) and without speed feedback (1 in 3), both at the exit of the bottom
+hairpin. The side guard shows no measurable effect and stays as a safety margin.
 
 ### Parameter tuning (CMA-ES)
 
-Ten parameters were tuned with CMA-ES ([`tools/tune.py`](tools/tune.py)) directly in the
-simulator. The ten: top speed, cornering limit, braking, corner-entry speed, stop margin, preview
-gain, kp, look-ahead, traction slip and side clearance.
+Parameters were tuned with CMA-ES ([`tools/tune.py`](tools/tune.py)) directly in the simulator:
+one evaluation is a reset plus 3 laps, the score is the mean of laps 2–3, and a wall contact
+scores 12 s.
 
-- One evaluation is a reset plus 3 laps. The score is the mean of laps 2–3, and any wall contact
-  scores 12 s.
-- Stage 1 started from the hand-tuned configuration plus traction control, and ran 60
-  evaluations. `kp` and the
-  look-ahead ended on the edge of their ranges.
-- Stage 2 widened those two ranges and ran 30 more evaluations.
-- All 90 configurations were clean.
-- The best one was re-measured from scratch: 3 runs × 4 laps, interleaved with the hand-tuned
-  configuration and the runners-up. This guards against picking a lucky evaluation. The result was
-  6.363 s, against 6.32 s during the search. Its values, rounded, are the node's defaults.
+| Stage | Steering | Parameters | Evaluations | Clean | Best score |
+|---|---|---|---|---|---|
+| 1 | two-wall PD | 10 | 60 | 60 | 6.53 |
+| 2 | two-wall PD, kp and lookahead ranges widened | 10 | 30 | 30 | 6.32 |
+| 3 | aim point | 12 | 35 | 34 | 6.09 |
+| 4 | aim point, from the stage-3 winner with a smaller step | 12 | 42 | 42 | 6.01 |
 
-What the optimiser changed:
-- gentler steering (`kp` 0.9 → 0.42, base look-ahead 0.5 → 0.26 m);
-- braking planned at the measured 6 m/s² instead of 4;
-- a higher cornering limit (7.8 m/s²);
-- traction control at 18 % slip.
-
-Full history: [`experiments/tuning_history.jsonl`](experiments/tuning_history.jsonl).
+Every winner was re-measured from scratch (3 runs × 4 laps, interleaved with the previous
+configuration) before being adopted. The expected optimism of a best-of-42 score with this lap
+noise is 0.01–0.02 s; the re-measurements agreed with the scores within that.
 
 ### Measurements that shaped the design
 
@@ -129,13 +151,43 @@ Full history: [`experiments/tuning_history.jsonl`](experiments/tuning_history.js
 |---|---|
 | Throttle sets wheel speed: steady speed ≈ 25 m/s × throttle | `throttle = v_target / 25` + speed feedback |
 | Full throttle from low speed spins the wheels (5.4 vs 7.4 m/s after 1.2 s) | traction control |
-| Braking is ≈ 6 m/s² for any throttle below the current speed (0, −0.3 and −1 are the same) | no special braking logic; plan with 6 m/s² |
-| Constant 4–5 m/s crashes into the outer wall of the bottom hairpin; 3 m/s is clean | brake on the free distance ahead, limit cornering speed |
-| The LiDAR gives ~40 new scans/s; the bridge republishes each 3–5× (~160 messages/s) | steering only on new scans; D term computed between real scans |
-| The D term never helped (kd 0 ≈ 0.03 < 0.06 < 0.12) | `D + L·sin α` already contains the heading; kd kept small |
-| A reset does not restart the lap timer | compare flying laps only |
+| Braking is ≈ 6 m/s² for any throttle below the current speed | no special braking logic |
+| Steering onset latency ≈ 20 ms; the kinematic model matches at low lateral acceleration | kinematic pure pursuit is adequate |
+| Sustained grip ≈ 8 m/s²; asking for 9–11.5 made laps a full second slower (the car slides wide and hits full lock) | cornering limit near 8 |
+| The LiDAR gives ~40 new scans/s; the bridge republishes each 3–5× | steering only on new scans |
+| The tuned two-wall car was already at the point-mass speed limit of the line it drove (5.96 s ideal on a 30.4 m path vs 6.31 actual) while a shorter line allowed 5.74 s | the remaining time was in the line, which led to the aim-point steering |
 
-[`tools/sysid.py`](tools/sysid.py) reproduces the acceleration and braking measurements.
+[`tools/sysid.py`](tools/sysid.py) reproduces the acceleration, braking and steering
+measurements; [`tools/lap_analysis.py`](tools/lap_analysis.py) compares a driven lap to the ideal
+profile on its own path, segment by segment.
+
+### Things that did not work
+
+- **Pure-pursuit geometry on the wall-centring error** (`steer_law:=pursuit_wall`, gain falling
+  with speed): 7.1–8.1 s. At hairpin speeds its gain is high, the steering saturates, and the
+  cornering limit then holds the car to ~2 m/s. Kept in the code, off by default.
+- **Stiffer two-wall gains** (kp 0.9 with the tuned speed logic): 7.25–7.96 s, same saturation.
+- **A bounded inside-of-corner offset on the two-wall law**: 6.39 s, no gain.
+- **Cornering limits above the measured grip** (9–11.5 m/s²): 7.2–7.4 s.
+- **Longer aim-point lookahead** (2.5 m): the car cut the bottom hairpin too early and nearly
+  stalled at the apex (6.6 s).
+
+## Robustness
+
+- **Consecutive laps.** **31 of 31** in one run of the real node (`ros2 run`, default parameters): best 5.994 s, mean 6.012 ± 0.009 s, slowest flying lap 6.031 s. An earlier 31-lap attempt with the same configuration ended
+  in a wall contact in lap 2, at the left-side S-bend; its trace shows a 0.36 s gap with no scan
+  messages just before the contact, while a test suite was running on the same machine. The car
+  covered 1.85 m blind at 5 m/s. Timing-critical runs were made with the machine otherwise idle
+  after that. One run of 31 laps bounds the per-lap contact probability to roughly below 10 %; it
+  does not prove the car never touches a wall.
+- **Tightest spot.** The default line passes the left wall at 0.33 m (LiDAR to wall, about
+  0.17 m of body clearance) at 4.8 m/s in the left-side S-bend; the two-wall configurations pass
+  it at 0.41 m. A wider side clearance (0.43 m) gains only 2 cm there and costs 0.08 s per lap.
+- **Offline checks** (`tests/test_closed_loop.py`): the default and the two-wall configurations
+  finish laps on the mirrored, counter-clockwise track, at a 40 Hz control rate, with 2 cm LiDAR
+  noise and with 75 ms of extra command latency.
+- **Shutdown.** Ctrl+C on the node at 4.4 m/s brought the car to a stop, with the bridge
+  reporting throttle 0.
 
 ## Run it
 
@@ -144,20 +196,21 @@ Prerequisites: Docker Desktop, Git, and the IROS 2026 **practice** simulator.
 ```powershell
 docker build --platform linux/amd64 -t penn-challenge -f autodrive_devkit.Dockerfile .
 .\scripts\dev.ps1 up     # container + colcon build + bridge in the background (Windows)
-.\scripts\dev.ps1 run    # start wall_follow_node with the default (final) parameters
+.\scripts\dev.ps1 run    # start wall_follow_node with the default parameters
 ```
 
-Alternatively, use the commands from the challenge sheet. Start the bridge with
-`ros2 launch autodrive_roboracer bringup_headless.launch.py`, then run
-`ros2 run autodrive_roboracer wall_follow_node`. In the simulator, connect to `127.0.0.1:4567` and
-set Driving Mode to **Autonomous**.
-
-Options:
+Or use the commands from the challenge sheet: `ros2 launch autodrive_roboracer
+bringup_headless.launch.py`, then `ros2 run autodrive_roboracer wall_follow_node`. In the
+simulator connect to `127.0.0.1:4567` and set Driving Mode to **Autonomous**.
 
 ```bash
-# pure two-wall follower (no corner preview)
-ros2 run autodrive_roboracer wall_follow_node --ros-args -p preview_gain:=0.0
-# hand-tuned configuration: slower (7.1 s), more steering margin
+# two-wall follower with corner preview (~6.4 s)
+ros2 run autodrive_roboracer wall_follow_node --ros-args --params-file \
+  /home/autodrive_devkit/src/autodrive_devkit/config/two_wall_preview.yaml
+# pure two-wall follower (~7.3 s)
+ros2 run autodrive_roboracer wall_follow_node --ros-args --params-file \
+  /home/autodrive_devkit/src/autodrive_devkit/config/two_wall_pure.yaml
+# hand-tuned two-wall configuration (~7.1 s, the most conservative)
 ros2 run autodrive_roboracer wall_follow_node --ros-args --params-file \
   /home/autodrive_devkit/src/autodrive_devkit/config/hand_tuned.yaml
 ```
@@ -166,59 +219,56 @@ ros2 run autodrive_roboracer wall_follow_node --ros-args --params-file \
 
 | What | Where | Runs in |
 |---|---|---|
-| Unit tests on synthetic scans: geometry, signs, invalid beams, missing walls, repeated scans, speed modes, traction control, parameter validation | `autodrive_devkit/test/test_wall_follow.py` | CI + container |
-| Closed-loop tests in a small offline simulator on a replica of the track. Covers both directions (mirrored track), 40 Hz control, 2 cm LiDAR noise and 75 ms command latency. Also checks that a constant 4 m/s *does* crash, as it does in the real simulator | `tests/test_closed_loop.py`, `tools/sim2d.py` | CI + container |
+| Unit tests on synthetic scans: wall geometry, signs, invalid and empty scans, disparity extension, aim-point selection and fallback, repeated scans, speed modes, traction control, parameter validation | `autodrive_devkit/test/test_wall_follow.py` | CI + container |
+| Closed-loop tests in a small offline simulator on a replica of the track: both directions, 40 Hz control, LiDAR noise, command latency; also checks that a constant 4 m/s *does* crash, as it does in the real simulator | `tests/test_closed_loop.py`, `tools/sim2d.py` | CI + container |
 | Timed laps in the real simulator: reset, lap count, wall contacts, per-scan trace, code hash per result | `tools/experiment.py`, `tools/summarize.py` | container + simulator |
 
 GitHub Actions runs flake8, `colcon build` and both test suites in a `ros:humble` container on
-every push. The offline simulator is calibrated to measured acceleration, braking and grip, but it
-is a kinematic model: it catches regressions and does not predict lap times.
+every push. The offline simulator is calibrated to the measured acceleration, braking and grip,
+but it is a kinematic model: it catches regressions and does not predict lap times (it predicted a
+gain for `pursuit_wall` that the real simulator did not show).
 
 ## Reproducing the experiments
 
-Each results table above has a script and a raw results file in [`experiments/`](experiments/):
-
 | Experiment | Script | Results |
 |---|---|---|
-| Baselines and hand-tuned ablation | `final.sh` | `results_final.jsonl` |
-| Tuned candidates, final ablation, 31-lap run | `validate_tuned.sh`, `final2.sh` | `results_tuned_final.jsonl` |
+| Textbook baselines, hand-tuned two-wall ablation | `experiments/final.sh` | `results_final.jsonl` |
+| Two-wall CMA-ES winners, ablation, 31-lap run | `validate_tuned.sh`, `final2.sh` | `results_tuned_final.jsonl` |
+| Aim-point validation, ablation, 31-lap runs | `validate_gap.sh`, `final3.sh`, `final3b.sh` | `results_pursuit_final.jsonl` |
 | Screening rounds | `screen*.sh` | `results_screening*.jsonl` |
-| CMA-ES search | `tools/tune.py` | `tuning_history.jsonl` |
+| CMA-ES search (all four stages) | `tools/tune.py` | `tuning_history.jsonl` |
 
-`tools/summarize.py <file>` prints any of these as a table. Runs need the simulator in headless
-batch mode (`-batchmode -nographics -ip 127.0.0.1 -port 4567`). Start the simulator *before* the
-bridge. Otherwise the simulator's first message has no LiDAR data, the bridge raises a `KeyError`,
-and the connection stalls.
+`python3 tools/summarize.py <file>` prints any of these as a table. Runs need the simulator in
+headless batch mode (`.\scripts\dev.ps1 headless` starts it and the bridge in the right order:
+the simulator first, or the bridge raises a `KeyError` on the first message and stalls).
 
 ## Notes and limitations
 
-- **Where the results were measured.** All results were measured with the simulator in headless
-  batch mode on one PC. The GUI mode used for the video also renders, which can change message
-  timing. The offline tests cover 40 Hz control and 75 ms latency. If the car misbehaves in GUI
-  mode, the hand-tuned parameter file above is the conservative fallback.
-- **Run one ROS container at a time.** Containers on the same Docker network discover each
-  other's ROS 2 topics, so two controllers would drive the same car. To run several, give each its
-  own `ROS_DOMAIN_ID`.
-- **Tuned for this track.** The parameters were tuned on the practice track. The algorithm is
-  symmetric and passes the mirrored-track tests, but the exact numbers are specific to this
-  track's geometry.
+- All results were measured in headless batch mode on one PC. The GUI mode used for the video
+  also renders, which can change message timing; the parameter files above are the conservative
+  fallbacks.
+- Run one ROS container at a time: containers on the same Docker network discover each other's
+  topics and two controllers would drive the same car (`ROS_DOMAIN_ID` separates them).
+- The parameters are tuned for this track. The algorithm is symmetric and passes the mirrored
+  track offline, but the numbers are specific to this geometry.
 
 ## Repository layout
 
 ```
 autodrive_devkit/            ROS 2 package from AutoDRIVE + wall_follow_node.py (bridge unchanged)
-  config/hand_tuned.yaml     fallback parameter file
+  config/*.yaml              alternative parameter files (two-wall, hand-tuned)
 autodrive_devkit.Dockerfile  unchanged from AutoDRIVE, so the image builds from this repo
 tools/experiment.py          automated timed laps in the simulator
 tools/tune.py                CMA-ES parameter search
-tools/sysid.py               acceleration / braking measurements
+tools/sysid.py               acceleration / braking / steering measurements
+tools/lap_analysis.py        time lost per path segment vs the ideal profile
+tools/lap_bound.py           ideal lap time on a fixed path
 tools/sim2d.py               offline simulator used by the closed-loop tests
-tools/summarize.py           results tables (flying laps only)
+tools/summarize.py           results tables
 tools/track_map.py           track map from logged scans
-tools/lap_bound.py           point-mass reference lap time along a fixed path
 tests/                       closed-loop tests + track replica
 experiments/                 experiment scripts and raw results
-scripts/                     Windows helpers: dev.ps1 (up/run/test/shell/down), tune_up.ps1
+scripts/                     Windows helpers: dev.ps1 (up/run/headless/test/shell/down), tune_up.ps1
 ```
 
 AutoDRIVE files are BSD-licensed, Copyright (c) AutoDRIVE / Tinker Twins (see `LICENSE.AutoDRIVE`).

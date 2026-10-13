@@ -272,8 +272,10 @@ def pursuit_target(ranges, angles, lookahead, min_lookahead, fov_deg, hint):
     """
     fov = math.radians(fov_deg)
     in_fov = np.abs(angles) < fov
-    L = lookahead
-    while L >= min_lookahead:
+    L, last = lookahead, False
+    while not last:
+        if L <= min_lookahead:
+            L, last = min_lookahead, True
         free = in_fov & (ranges > L)
         if np.any(free):
             edges = np.flatnonzero(np.diff(np.r_[False, free, False]))
@@ -286,7 +288,9 @@ def pursuit_target(ranges, angles, lookahead, min_lookahead, fov_deg, hint):
                     best = (dist, 0.5 * (lo + hi))
             return float(best[1]), L
         L *= 0.8
-    return float(hint), min_lookahead
+    # Nothing is free even at min_lookahead: aim at the farthest (extended) beam in the FOV.
+    far = np.where(in_fov, ranges, -1.0)
+    return float(angles[int(np.argmax(far))]), min_lookahead
 
 
 def side_minimum(ranges, angles, side, lo_deg=20.0, hi_deg=160.0):
@@ -549,6 +553,8 @@ class WallFollowNode(Node):
         self.speed = msg.twist.twist.linear.x  # body frame: forward speed
 
     def _on_scan(self, msg):
+        if len(msg.ranges) < 3:  # malformed scan: keep the last command
+            return
         stamp = msg.header.stamp.sec + 1e-9 * msg.header.stamp.nanosec
         throttle, steering, info = self.controller.step(
             msg.ranges, msg.angle_min, msg.angle_increment, msg.range_max,

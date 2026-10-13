@@ -26,3 +26,6 @@ sleep 3
 python3 tools/experiment.py --external --label L2_ros2_run_31laps --laps 31 --timeout 400
 pkill -TERM -f 'lib/autodrive_roboracer/wall_follow_node'
 wait
+# Added after review: separate the steering change from the speed-envelope re-tune.
+# F12 = two-wall PD steering with the pursuit speed envelope; F13 = pursuit steering with the
+# PD-era speed envelope. 3 runs x 4 laps, interleaved with a repeat of the final defaults.

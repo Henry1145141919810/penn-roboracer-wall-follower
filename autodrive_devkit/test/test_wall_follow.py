@@ -382,3 +382,18 @@ def test_inside_offset_moves_the_target_inside_and_respects_clearance(turn):
     scan2 = corridor_scan(0.5, 1.1) if turn > 0 else corridor_scan(1.1, 0.5)
     _, _, info2 = run(WallFollowController(tight), scan2)
     assert abs(info2['e_ref']) <= 0.05 + 1e-9
+
+
+def test_pursuit_target_fallback_aims_at_the_widest_free_direction():
+    # Boxed in: nothing is free beyond 0.9 m except a 1 m wide slot to the right at 45 deg
+    # that is only 1.2 m deep, so the lookahead must shrink all the way to the minimum.
+    scan = np.full(N_BEAMS, 0.9)
+    slot = np.abs(ANGLES + math.radians(45)) < math.atan(0.5 / 0.9)
+    scan[slot] = 1.2
+    ext = extend_disparities(scan, ANGLE_INC, 0.25, 0.3)
+    theta, L = pursuit_target(ext, ANGLES, 2.0, 1.17, 90.0, 0.0)
+    assert L == 1.17  # shrank down to the minimum exactly
+    assert -math.radians(50) < theta < -math.radians(40)  # and aims through the slot
+    # Fully boxed in (all 0.5 m): the fallback still returns a finite direction.
+    theta, L = pursuit_target(np.full(N_BEAMS, 0.5), ANGLES, 2.0, 1.17, 90.0, 0.3)
+    assert math.isfinite(theta) and L == 1.17

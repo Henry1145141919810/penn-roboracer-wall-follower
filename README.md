@@ -7,7 +7,7 @@ simulator) from its LiDAR scan.
 |---|---|
 | **Fastest clean lap** | **5.994 s** (default configuration; simulator lap timer) |
 | **Consecutive clean laps** | **31 of 31** in one run of the real node (`ros2 run`, default parameters): best 5.994 s, mean 6.012 ± 0.009 s, slowest flying lap 6.031 s. |
-| **Video** | VIDEO_LINK_HERE (unlisted YouTube, Driver's Eye camera) |
+| **Video** | https://youtu.be/9fVgYthED2A (unlisted YouTube, Driver's Eye camera; the HUD in the video shows the simulator's lap timer, best lap 6.014 s in that session, collision counter 0) |
 | **Node** | [`autodrive_devkit/autodrive_roboracer/wall_follow_node.py`](autodrive_devkit/autodrive_roboracer/wall_follow_node.py) |
 
 All lap times are the simulator's own lap timer, the same clock the HUD shows. "Flying laps"

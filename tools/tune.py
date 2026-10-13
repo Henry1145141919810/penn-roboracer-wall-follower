@@ -60,6 +60,23 @@ SPACES['pursuit'] = {
     'stop_margin': (0.2, 0.8, 0.52),
     'traction_slip': (0.05, 0.3, 0.18),
 }
+# Pure-pursuit law on the wall-centring error + inside offset (steer_law=pursuit_wall,
+# preview_gain=0 fixed). Start = the first screening probe.
+SPACES['pursuit_wall'] = {
+    'steer_gain': (0.5, 1.4, 0.9),
+    'lookahead': (0.15, 0.6, 0.26),
+    'lookahead_per_speed': (0.05, 0.3, 0.15),
+    'lookahead_min': (0.3, 0.8, 0.45),
+    'inside_offset': (0.0, 0.5, 0.3),
+    'inside_alpha': (0.3, 1.0, 0.6),
+    'inner_clearance_min': (0.35, 0.6, 0.45),
+    'side_clearance': (0.25, 0.42, 0.37),
+    'v_max': (6.5, 9.5, 7.34),
+    'lat_accel': (6.5, 8.8, 7.8),
+    'brake_decel': (4.0, 8.0, 6.0),
+    'v_corner': (0.0, 3.0, 0.66),
+    'stop_margin': (0.2, 0.8, 0.52),
+}
 FIXED = {}  # parameters held constant during a search (--fixed name=value)
 
 

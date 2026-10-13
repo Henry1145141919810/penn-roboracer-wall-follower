@@ -1,0 +1,22 @@
+# Pure two-wall follower (no free-space aim point): PD on the wall-centring error with the
+# corner-preview bias. Slower than the default configuration but the steering reference is
+# the two fitted walls only. These are the defaults the node had before the pursuit mode.
+#   ros2 run autodrive_roboracer wall_follow_node --ros-args --params-file \
+#     /home/autodrive_devkit/src/autodrive_devkit/config/two_wall.yaml
+wall_follow_node:
+  ros__parameters:
+    steer_mode: pd
+    steer_law: pd
+    kp: 0.42
+    kd: 0.03
+    lookahead: 0.26
+    lookahead_per_speed: 0.15
+    preview_gain: 0.27
+    inside_offset: 0.0
+    v_max: 7.34
+    lat_accel: 7.8
+    brake_decel: 6.0
+    v_corner: 0.66
+    stop_margin: 0.52
+    traction_slip: 0.18
+    side_clearance: 0.37

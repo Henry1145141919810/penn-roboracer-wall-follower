@@ -14,4 +14,4 @@ $E --label Z8_pw_g1.2_in0.3      $W -p steer_gain=1.2 -p inside_offset=0.3
 $E --label Z8_pw_g0.7_in0.3      $W -p steer_gain=0.7 -p inside_offset=0.3
 $E --label Z8_pw_g0.9_in0.3_lmin0.6 $W -p steer_gain=0.9 -p inside_offset=0.3 -p lookahead_min=0.6
 $E --label Z8_pw_g0.9_in0.3_lps0.25 $W -p steer_gain=0.9 -p inside_offset=0.3 -p lookahead_per_speed=0.25
-$E --label Z8_pursuit_L2.0       -p steer_mode=pursuit -p preview_gain=0 -p kp=0.15
+$E --label Z8_pursuit_L1.2_default -p steer_mode=pursuit -p preview_gain=0 -p kp=0.15   # lookahead left at the 1.2 m default
